@@ -70,13 +70,19 @@ define list_rec
 		if ($dp->flags & 0x1)
 			set $p=(struct dinternal *)($mp->p + $dp->linp[$k])
 			if ($p->ksize)
-				printf "%8u ", *(unsigned int*) ($p->bytes)
+				printf "%02x", ((unsigned char *) ($p->bytes))[0]
+				printf "%02x", ((unsigned char *) ($p->bytes))[1]
+				printf "%02x", ((unsigned char *) ($p->bytes))[2]
+				printf "%02x ",((unsigned char *) ($p->bytes))[3]
 			else
-				printf "%8u ", 0
+				printf "%08x ", 0
 			end
 		else
 			set $p=(DLEAF *) ($mp->p + $dp->linp[$k])
-			printf "%u ", *(unsigned int*) ($p->bytes)
+			printf "%02x", ((unsigned char *) ($p->bytes))[0]
+			printf "%02x", ((unsigned char *) ($p->bytes))[1]
+			printf "%02x", ((unsigned char *) ($p->bytes))[2]
+			printf "%02x ",((unsigned char *) ($p->bytes))[3]
 		end
 		set $k=$k+1
 	end

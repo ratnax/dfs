@@ -53,7 +53,7 @@ __bt_cmp(BTREE *t, const DBT *k1, struct mpage *mp, int indx)
 	 * page when the user inserts a new key in the tree smaller than
 	 * anything we've yet seen.
 	 */
-	if (indx == 0 && (dp->flags & DP_BINTERNAL))
+	if (indx == 0 && dp->flags & DP_BINTERNAL)
 		return (1);
 
 //	if (indx == 0 && (dp->flags & DP_BINTERNAL))
@@ -72,39 +72,12 @@ __bt_cmp(BTREE *t, const DBT *k1, struct mpage *mp, int indx)
 	return ((*t->bt_cmp)(k1, &k2));
 }
 
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
-
-/*
- * __BT_DEFCMP -- Default comparison routine.
- *
- * Parameters:
- *	a:	DBT #1
- *	b: 	DBT #2
- *
- * Returns:
- *	< 0 if a is < b
- *	= 0 if a is = b
- *	> 0 if a is > b
- */
 static int
 __bt_defcmp(const DBT *a, const DBT *b)
 {
 	register size_t len;
 	register unsigned char *p1, *p2;
 
-
-	if (a->size == 0 && b->size == 0) return 0;
-	if (b->size == 0) return 1;
-	if (a->size == 0) return -1;
-
-	return ((long) (*(uint32_t *) a->data)) - ((long)(*(uint32_t *) b->data));
-
-	/*
-	 * XXX
-	 * If a size_t doesn't fit in an int, this routine can lose.
-	 * What we need is a integral type which is guaranteed to be
-	 * larger than a size_t, and there is no such thing.
-	 */
 	len = MIN(a->size, b->size);
 	for (p1 = a->data, p2 = b->data; len--; ++p1, ++p2)
 		if (*p1 != *p2)
@@ -452,7 +425,11 @@ __get_parent_locked(BTREE *t, struct mpage *c_mp, indx_t *indxp, bool excl)
 		key.size = dl->ksize;
 //		assert(dl->ksize && dl->ksize <= DP_MAX_KSIZE);
 	} else { 	
-		DINTERNAL *di = GETDINTERNAL(c_mp->dp, 0);
+		DINTERNAL *di;
+		if (DP_NXTINDX(c_mp->dp) > 1)
+			di = GETDINTERNAL(c_mp->dp, 1);
+		else
+			di = GETDINTERNAL(c_mp->dp, 0);
 		memcpy(key_mem, di->bytes, di->ksize);
 		key.data = key_mem;
 		key.size = di->ksize;
@@ -714,7 +691,21 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 	char *from;
 	struct dpage *dp = mp->dp;
 
-	/*
+	if (indx == 1 && DP_NXTINDX(dp) == 2) {
+		DINTERNAL *next_di;
+		indx_t tmp;
+
+		di = GETDINTERNAL(dp, 0);
+		next_di = GETDINTERNAL(dp, 1);
+
+		tmp = dp->linp[0];
+		dp->linp[0] = dp->linp[1];
+		dp->linp[1] = tmp;
+
+		next_di->pgno = di->pgno;
+	}
+	
+/*
 	if (indx == 0 && DP_NXTINDX(dp) > 1) {
 		DINTERNAL *next_di;
 
@@ -724,7 +715,7 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 		di->pgno = next_di->pgno;
 		indx = 1;
 	}
-	*/
+*/
 	/* If the entry uses overflow pages, make them available for reuse. */
 	to = di = GETDINTERNAL(dp, indx);
 
