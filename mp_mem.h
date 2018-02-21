@@ -10,6 +10,8 @@
 
 #define printf(fmt, ...) 
 
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+
 typedef uint64_t 	pgno_t;
 typedef uint16_t	indx_t;
 
@@ -61,6 +63,8 @@ struct mpage {
 #define MP_INDELQ 		0x200
 	bool leftmost;
 
+	int writers;
+	int readers;
 	uint32_t flags;
 	uint32_t npg;
 	int32_t count;

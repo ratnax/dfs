@@ -39,14 +39,26 @@ struct mpage *bt_page_get(uint64_t pgno)
 
 void bt_page_lock(struct mpage *mp, lock_type_t type)
 {
-	if (type == PAGE_LOCK_SHARED)
+	if (type == PAGE_LOCK_SHARED) {
 		pthread_rwlock_rdlock(&mp->lock);
-	else
+		__sync_fetch_and_add(&mp->readers, 1);
+	} else {
 		pthread_rwlock_wrlock(&mp->lock);
+		assert(mp->writers == 0);
+		mp->writers++;
+	}
 }
 
 void bt_page_unlock(struct mpage *mp)
 {
+	if (mp->writers) {
+		mp->writers--;
+		assert(mp->writers == 0);
+	} else {
+		assert(mp->readers);
+		__sync_fetch_and_sub(&mp->readers, 1);
+		assert(mp->readers >= 0);
+	}
 	pthread_rwlock_unlock(&mp->lock);
 }
 

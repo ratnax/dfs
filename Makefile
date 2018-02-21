@@ -1,4 +1,4 @@
-CFLAGS=-Wfatal-errors
+CFLAGS=-Wfatal-errors -O3
 LDFLAGS="-lpthread"
 
 t: t_mem.o mp_mem.o

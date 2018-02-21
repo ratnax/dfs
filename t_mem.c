@@ -1182,10 +1182,12 @@ int __bt_split(BTREE *t, struct mpage *mp)
 	int err;
 
 	bt_page_lock(mp, PAGE_LOCK_EXCL);
+	assert(!(mp->flags & MP_SPLITTING));
 
 	assert(mp->npg > 1);
 //	assert(!(mp->flags & MP_DELETED));
-	if (mp->flags & MP_DELETED) {
+	if (mp->flags & MP_DELETED ||
+		mp->flags & MP_DELETING) {
 		bt_page_unlock(mp);
 		return 0;
 	}
@@ -1298,6 +1300,12 @@ int __bt_delete(BTREE *t, struct mpage *mp)
 
 	bt_page_lock(mp, PAGE_LOCK_EXCL);
 	
+	if (mp->flags & MP_DELETED ||
+		mp->flags & MP_SPLITTING) {
+		bt_page_unlock(mp);
+		return 0;
+	}
+
 	dp = mp->dp;
 	if (!DP_NXTINDX(dp)) {
 		mp->flags |= MP_DELETING;
@@ -1337,23 +1345,20 @@ int __bt_delete(BTREE *t, struct mpage *mp)
 		dp->lower = DP_HDRLEN;
 		dp->upper = mp->npg * PAGE_SIZE;
 
-		mp->flags &= ~MP_DELETING;
-
-		bt_page_unlock(mp);
-
 		pthread_mutex_lock(&mp->mutex);	
 		mp->flags &= ~MP_DELETING;
 		pthread_cond_broadcast(&mp->cond);
 		pthread_mutex_unlock(&mp->mutex);		
 
+		bt_page_unlock(mp);
 		bt_page_put(pmp);
 		return 0;
 	} else {
 		__remove_internal_at(pmp, NULL, indx);
-		for (i = 0; i < DP_NXTINDX(pmp->dp); i++) {
-			DINTERNAL *di = GETDINTERNAL(pmp->dp, i);
-			assert(di->pgno != mp->pgno);
-		}
+//		for (i = 0; i < DP_NXTINDX(pmp->dp); i++) {
+//			DINTERNAL *di = GETDINTERNAL(pmp->dp, i);
+//			assert(di->pgno != mp->pgno);
+//		}
 		__check_order(pmp);
 		if (DP_NXTINDX(pmp->dp) == 0) {
 			pthread_mutex_lock(&delq_mutex);
@@ -1568,7 +1573,7 @@ void *test1(void *arg)
 	}
 
 
-
+
 //	sleep(5);
 	{
 		unsigned long k1k = k * 1000000000 + j;
