@@ -591,31 +591,31 @@ static int __bt_page_extend(BTREE *t, struct mpage *mp)
 
 static int __bt_page_shrink(BTREE *t, struct mpage *mp)
 {
-	struct dpage *dp = NULL, *old_dp = mp->dp;
-	size_t size = PAGE_SIZE * mp->npg; 
-	int i;
+	struct dpage *dp = mp->dp;
+	struct dpage *new_dp;
+	size_t i, shift;
 
-	assert(mp->npg > 1);
-	assert(DP_NXTINDX(old_dp));
+	if (mp->npg == 1 || 
+		dp->upper - dp->lower < (shift = mp->npg - 1 << PAGE_SHFT))
+		return 0;
 
-	dp = malloc(size);
-	if (!dp)
+	new_dp = malloc(PAGE_SIZE);
+	if (!new_dp)
 		return -ENOMEM;
 
-	assert(old_dp->upper >= size - PAGE_SIZE);
-	dp->upper = old_dp->upper - (size - PAGE_SIZE);
-	dp->lower = old_dp->lower;
-	dp->flags = old_dp->flags;
+	new_dp->upper = dp->upper - shift;
+	new_dp->lower = dp->lower;
+	new_dp->flags = dp->flags;
 
-	memcpy((void *) dp + dp->upper, (void *) old_dp + old_dp->upper, 
-			size - old_dp->upper);  
+	memcpy((void *) new_dp + new_dp->upper, (void *) dp + dp->upper, 
+			PAGE_SIZE - new_dp->upper);  
 
-	for (i = 0; i < DP_NXTINDX(old_dp); i++) 
-		dp->linp[i] = old_dp->linp[i] - (size - PAGE_SIZE);
+	for (i = 0; i < DP_NXTINDX(dp); i++) 
+		new_dp->linp[i] = dp->linp[i] - shift;
 
-	mp->dp = dp;
+	mp->dp = new_dp;
 	mp->npg = 1; 
-	free(old_dp);
+	free(dp);
 	__check_order(mp);
 	return 0;
 }
@@ -1177,32 +1177,35 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *p_mp, indx_t indx,
 int __bt_split(BTREE *t, struct mpage *mp)
 {
 	struct mpage *lmp, *rmp, *pmp, *nr_mp;
-	struct dpage *dp;
 	indx_t indx;
 	int err;
 
 	bt_page_lock(mp, PAGE_LOCK_EXCL);
-	assert(!(mp->flags & MP_SPLITTING));
 
+	assert(!(mp->flags & MP_SPLITTING));
 	assert(mp->npg > 1);
-//	assert(!(mp->flags & MP_DELETED));
+
 	if (mp->flags & MP_DELETED ||
-		mp->flags & MP_DELETING) {
+		mp->flags & MP_DELETING ||
+		!DP_NXTINDX(mp->dp)) {
+
+		mp->flags &= ~MP_INSPLQ;
 		bt_page_unlock(mp);
 		return 0;
 	}
 
-	dp = mp->dp;
-	while(mp->npg > 1 && DP_NXTINDX(dp) &&
-		(dp->upper - dp->lower) >= PAGE_SIZE * (mp->npg - 1)) { 
+/*
+	if (MP_DELETED(mp) || MP_DELETING(mp) || DP_EMPTY(mp->dp)) {
 
-		err = __bt_page_shrink(t, mp);
-		assert(!err);
-		dp = mp->dp;
+		mp->flags &= ~MP_INSPLQ;
+		bt_page_unlock(mp);
+		return 0;
 	}
+*/
+	err = __bt_page_shrink(t, mp);
+	assert(!err);
 
-	assert(!(mp->flags & MP_DELETED));
-	if (mp->npg == 1 || !DP_NXTINDX(dp)) {
+	if (mp->npg == 1) {
 		mp->flags &= ~MP_INSPLQ;
 		bt_page_unlock(mp);
 		return 0;
@@ -1302,6 +1305,8 @@ int __bt_delete(BTREE *t, struct mpage *mp)
 	
 	if (mp->flags & MP_DELETED ||
 		mp->flags & MP_SPLITTING) {
+
+		mp->flags &= ~MP_INDELQ;
 		bt_page_unlock(mp);
 		return 0;
 	}
