@@ -1,0 +1,5 @@
+Concert mp->npg to mp->size.
+Fix mp & dp flags with Macros.
+Fix root split in __bt_delete. (npg * PAGE_SIZE)
+test root delete. (delete all)
+__bt_split:  internal node overflow case to be handled.

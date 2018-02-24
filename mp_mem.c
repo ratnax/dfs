@@ -9,6 +9,7 @@
 
 
 #include "mp_mem.h"
+#define printf(fmt, ...) 
 
 #define MP_MAXPAGES 1024000
 static struct mpage mp_pages[MP_MAXPAGES];
@@ -24,7 +25,6 @@ struct mpage *bt_page_get_nowait(uint64_t pgno)
 	pthread_mutex_unlock(&mutex);
 
 	assert(mp_pages[pgno].dp);
-//	assert(!(mp_pages[pgno].flags & MP_DELETED));
 	return &mp_pages[pgno];
 }
 
@@ -117,17 +117,21 @@ struct mpage *bt_page_new(int npg)
 	}
 	mp->npg = npg;
 	mp->flags = 0;
+	mp->state = MP_STATE_NORMAL;
+	mp->leftmost = false;
 	pthread_mutex_lock(&mutex);
 	mp->count++;
 	pthread_mutex_unlock(&mutex);
 	return mp;
 }
 
+/*
 void bt_page_delete(struct mpage *mp)
 {
 	printf("mp deleted: %d\n", mp->pgno);
 	mp->flags |= MP_DELETED;
 }
+*/
 
 void bt_page_put(struct mpage *mp)
 {
@@ -136,7 +140,7 @@ void bt_page_put(struct mpage *mp)
 	assert(mp->count >= 0);
 	if (mp->count == 0) {
 		pthread_mutex_unlock(&mutex);
-		if (mp->flags & MP_DELETED) {
+		if (MP_DELETED(mp)) {
 			if (mp->dp)
 				free(mp->dp);
 			mp->dp = NULL;
@@ -168,6 +172,8 @@ int bt_page_init(void)
 
 		mp->flags = 0;
 		mp->dp = NULL;
+		mp->state = MP_STATE_NORMAL;
+		mp->leftmost = false;
 
 		mp->pgno = i;
 	}		

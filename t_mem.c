@@ -8,14 +8,10 @@
 
 #include "mp_mem.h"
 
-static TAILQ_HEAD(spl_queue, mpage) splq_head;
-static TAILQ_HEAD(del_queue, mpage) delq_head;
+static TAILQ_HEAD(reorg_queue, mpage) reorg_queue_head;
 
-static pthread_mutex_t splq_mutex;
-static pthread_mutex_t delq_mutex;
-
-static pthread_cond_t splq_cond;
-static pthread_cond_t delq_cond;
+static pthread_mutex_t reorg_queue_mutex;
+static pthread_cond_t reorg_queue_cond;
 
 
 static void
@@ -55,10 +51,6 @@ __bt_cmp(BTREE *t, const DBT *k1, struct mpage *mp, int indx)
 	 */
 	if (indx == 0 && dp->flags & DP_BINTERNAL)
 		return (1);
-
-//	if (indx == 0 && (dp->flags & DP_BINTERNAL))
-//		return (1);
-
 
 	if (dp->flags & DP_BLEAF) {
 		DLEAF *dl = GETDLEAF(dp, indx);
@@ -136,15 +128,9 @@ __lookup_parent_nowait(BTREE *t, struct mpage *g_mp, struct mpage *p_mp,
 	struct mpage *mp;
 	pgno_t pgno;
 
-	assert(DP_NXTINDX(p_mp->dp));
 	pgno = __lookup_internal(t, p_mp, key, indxp);
 	if ((mp = bt_page_get_nowait(pgno))) {
-
-		if (*indxp == 0 && p_mp->leftmost)
-			mp->leftmost = true;
-		else
-			mp->leftmost = false;
-
+		mp->leftmost = (*indxp == 0 && p_mp->leftmost);
 		return mp;
 	}
 			
@@ -206,95 +192,7 @@ static struct mpage * __bt_get_root(struct mpage *md_pg)
 	mp->leftmost = true;
 	return mp;
 }
-
-void __check_links(struct mpage *pmp, struct mpage *lmp, struct mpage *rmp, int indx)
-{
-	DINTERNAL *pdi = GETDINTERNAL(pmp->dp, indx);
-	
-	return;
-
-	if (lmp->dp->flags & DP_BLEAF) {
-		struct dpage *ldp = lmp->dp;
-		DLEAF *dl = GETDLEAF(ldp, 0);
-
-		if (pdi->ksize) 
-			assert(*(unsigned int *)(dl->bytes) >= *(unsigned int *) pdi->bytes);
-		else
-			assert(*(unsigned int *)(dl->bytes) >= 0);
-	} else {
-		struct dpage *ldp = lmp->dp;
-		DINTERNAL *di = GETDINTERNAL(ldp, 0);
-
-		if (di->ksize) {
-			if (pdi->ksize)
-				assert(*(unsigned int *)(di->bytes) == *(unsigned int *) pdi->bytes);
-			else
-				assert(*(unsigned int *)(di->bytes) >= 0);
-		} else
-			assert(pdi->ksize == 0);
-	}
-
-	if (!rmp) return;
-
-	pdi = GETDINTERNAL(pmp->dp, indx+1);
-
-	if (rmp->dp->flags & DP_BLEAF) {
-		struct dpage *rdp = rmp->dp;
-		DLEAF *dl = GETDLEAF(rdp, 0);
-
-		assert(*(unsigned int *)(dl->bytes) >= *(unsigned int *) pdi->bytes);
-	} else {
-		struct dpage *rdp = rmp->dp;
-		DINTERNAL *di = GETDINTERNAL(rdp, 0);
-
-		assert(di->ksize);
-		assert(pdi->ksize);
-		assert(*(unsigned int *)(di->bytes) == *(unsigned int *) pdi->bytes);
-	}
-
-}
-
-void validate(struct mpage *mp)
-{
-	int i;
-	return;
-	if (mp->dp->flags & DP_BLEAF) return;
-	for (i = 0; i < DP_NXTINDX(mp->dp); i++) {
-		DINTERNAL *di = GETDINTERNAL(mp->dp, i);
-		bt_page_put(bt_page_get(di->pgno));
-	}
-}
-
-void __check_order(struct mpage *mp)
-{
-	struct dpage *dp = mp->dp;
-	unsigned int prev = 0, k;
-	int i;
-	return;
-	
-//	if (dp->flags & DP_BINTERNAL) 
-//		return;
-	
-//	return;
-	for (i = (dp->flags & DP_BLEAF) ? 0 : 1; i < DP_NXTINDX(dp); i++) {
-
-		if (dp->flags & DP_BLEAF) {
-			DLEAF *dl = (DLEAF *) (mp->p + dp->linp[i]);
-			k = *(unsigned int *) dl->bytes;
-		} else {
-			DINTERNAL *di = (DINTERNAL *) (mp->p + dp->linp[i]);
-			if (di->ksize == 0)
-				k = 0;
-			else
-				k = *(unsigned int *) di->bytes;
-		}
-
-		assert(prev <= k);
-		prev = k;
-	}
-}
 			
-
 struct mpage *__get_md_page(void)
 {
 	struct mpage *mp;
@@ -302,14 +200,34 @@ struct mpage *__get_md_page(void)
 	if (IS_ERR(mp))
 		return mp;
 
-	mp->flags |= MP_METADATA;
+	MP_SET_METADATA(mp);
 	return mp;
 }
 
-static struct mpage * __bt_get_leaf(BTREE *t, const DBT *key, int excl)
+static int __wait_on_reorg(struct mpage *mp, struct mpage *pmp)
+{
+	if (MP_REORGING(mp)) {
+		bt_page_unlock(mp);
+		if (pmp)
+			bt_page_unlock(pmp);
+
+		pthread_mutex_lock(&mp->mutex);
+		while (MP_REORGING(mp)) 
+			pthread_cond_wait(&mp->cond, &mp->mutex);
+		pthread_mutex_unlock(&mp->mutex);
+
+		bt_page_put(mp);
+		return -EAGAIN;
+	}
+	return 0;
+}
+
+static struct mpage *
+__bt_get_leaf_locked(BTREE *t, const DBT *key, int excl)
 {
 	struct mpage *mp, *p_mp = NULL;
 	indx_t indx;
+	int err;
 
 	do {
 		p_mp = __get_md_page();
@@ -318,73 +236,42 @@ static struct mpage * __bt_get_leaf(BTREE *t, const DBT *key, int excl)
 
 		bt_page_lock(p_mp, PAGE_LOCK_SHARED);
 
-		//printf("%d ", p_mp->pgno);
-//		fflush(stdout);
 		mp = __bt_get_root(p_mp);
 		if (IS_ERR(mp)) {
 			bt_page_unlock(p_mp);
 			bt_page_put(p_mp);
 			return mp;
 		}
+
 		while (!IS_ERR(mp)) {
 
-			printf("%d ", mp->pgno);
-//			fflush(stdout);
-
-			if (mp->dp->flags & DP_BINTERNAL) {
+			if (MP_ISINTERNAL(mp)) {
 				bt_page_lock(mp, PAGE_LOCK_SHARED);
-				assert(!(mp->flags & MP_DELETED));
 
-				if (mp->flags & MP_SPLITTING ||
-					mp->flags & MP_DELETING) {
-
-					bt_page_unlock(mp);
-					bt_page_unlock(p_mp);
-
-					pthread_mutex_lock(&mp->mutex);
-					while (mp->flags & MP_SPLITTING ||
-						mp->flags & MP_DELETING) 
-						pthread_cond_wait(&mp->cond, &mp->mutex);
-					pthread_mutex_unlock(&mp->mutex);
-
-					bt_page_put(mp);
+				err = __wait_on_reorg(mp, p_mp);
+				if (err) {
 					mp = ERR_PTR(EAGAIN);
 					break;
 				}
+
+				bt_page_unlock(p_mp);
+				bt_page_put(p_mp);
 			} else {
 
 				if (excl) {
 					bt_page_lock(mp, PAGE_LOCK_EXCL);
 
-					assert(!(mp->flags & MP_DELETED));
-
-					if (mp->flags & MP_SPLITTING ||
-						mp->flags & MP_DELETING) {
-
-						bt_page_unlock(mp);
-						bt_page_unlock(p_mp);
-
-						pthread_mutex_lock(&mp->mutex);
-						while (mp->flags & MP_SPLITTING ||
-							mp->flags & MP_DELETING) 
-							pthread_cond_wait(&mp->cond, &mp->mutex);
-						pthread_mutex_unlock(&mp->mutex);
-
-						bt_page_put(mp);
+					err = __wait_on_reorg(mp, p_mp);
+					if (err) {
 						mp = ERR_PTR(EAGAIN);
 						break;
 					}
 				} else {
 					bt_page_lock(mp, PAGE_LOCK_SHARED);
 				}
-			}
 
-			bt_page_unlock(p_mp);
-			bt_page_put(p_mp);
-
-			if (mp->dp->flags & DP_BLEAF) {
-				printf("\n");
-				//assert(!(mp->flags & MP_DELETED));
+				bt_page_unlock(p_mp);
+				bt_page_put(p_mp);
 				return mp;
 			}
 
@@ -393,7 +280,6 @@ static struct mpage * __bt_get_leaf(BTREE *t, const DBT *key, int excl)
 		}
 
 		bt_page_put(p_mp);
-		printf("\n");
 	} while (PTR_ERR(mp) == EAGAIN);
 
 	return mp;
@@ -401,12 +287,12 @@ static struct mpage * __bt_get_leaf(BTREE *t, const DBT *key, int excl)
 
 static struct mpage *__bt_get_leaf_excl(BTREE *t, const DBT *key)
 {
-	return __bt_get_leaf(t, key, true);
+	return __bt_get_leaf_locked(t, key, true);
 }
 
 static struct mpage *__bt_get_leaf_shared(BTREE *t, const DBT *key)
 {
-	return __bt_get_leaf(t, key, false);
+	return __bt_get_leaf_locked(t, key, false);
 }
 
 static struct mpage * 
@@ -416,15 +302,17 @@ __get_parent_locked(BTREE *t, struct mpage *c_mp, indx_t *indxp, bool excl)
 	char key_mem[DP_MAX_KSIZE];
 	DBT key;
 	pgno_t pgno;
+	int err;
 	
 	bt_page_lock(c_mp, PAGE_LOCK_SHARED); 
-	if (c_mp->dp->flags & DP_BLEAF) {
+	if (MP_ISLEAF(c_mp)) {
+
 		DLEAF *dl = GETDLEAF(c_mp->dp, 0);
 		memcpy(key_mem, dl->bytes, dl->ksize);
 		key.data = key_mem;
 		key.size = dl->ksize;
-//		assert(dl->ksize && dl->ksize <= DP_MAX_KSIZE);
 	} else { 	
+
 		DINTERNAL *di;
 		if (DP_NXTINDX(c_mp->dp) > 1)
 			di = GETDINTERNAL(c_mp->dp, 1);
@@ -433,7 +321,6 @@ __get_parent_locked(BTREE *t, struct mpage *c_mp, indx_t *indxp, bool excl)
 		memcpy(key_mem, di->bytes, di->ksize);
 		key.data = key_mem;
 		key.size = di->ksize;
-//		assert(di->ksize && di->ksize <= DP_MAX_KSIZE);
 	}
 	bt_page_unlock(c_mp); 
 
@@ -460,92 +347,68 @@ __get_parent_locked(BTREE *t, struct mpage *c_mp, indx_t *indxp, bool excl)
 
 		while (!IS_ERR(mp)) {
 			if (mp->pgno == c_mp->pgno) {
-				assert(!(p_mp->flags & MP_DELETED));
+
 				if (excl) {
 					bt_page_unlock(p_mp);
 					bt_page_put(mp);
+
 					bt_page_lock(p_mp, PAGE_LOCK_EXCL);
-					if (p_mp->flags & MP_SPLITTING ||
-						p_mp->flags & MP_DELETING) {
-
-						bt_page_unlock(g_mp);
-						bt_page_unlock(p_mp);
-
-						pthread_mutex_lock(&p_mp->mutex);
-						while (p_mp->flags & MP_SPLITTING ||
-							p_mp->flags & MP_DELETING) 
-							pthread_cond_wait(&p_mp->cond, &p_mp->mutex);
-						pthread_mutex_unlock(&p_mp->mutex);
+					err = __wait_on_reorg(p_mp, g_mp);
+					if (err) {
+						p_mp = NULL;
 						mp = ERR_PTR(EAGAIN);
 						break;
 					}
+					bt_page_unlock(g_mp);
+					bt_page_put(g_mp);
+			
+					pgno = __lookup_internal(t, p_mp, &key, indxp);
+					assert(c_mp->pgno == pgno);
+
+					return p_mp;
 				} else {
+					bt_page_unlock(g_mp);
+					bt_page_put(g_mp);
 					bt_page_put(mp);
+					return p_mp;
 				}
+			} else { 
 
 				bt_page_unlock(g_mp);
 				bt_page_put(g_mp);
 
-				pgno = __lookup_internal(t, p_mp, &key, indxp);
-				assert(pgno == c_mp->pgno);
-				assert(*indxp < DP_NXTINDX(p_mp->dp));
-				DINTERNAL *di = GETDINTERNAL(p_mp->dp, *indxp);
-				assert(di->pgno == pgno);
+				bt_page_lock(mp, PAGE_LOCK_SHARED);
 
-				assert(!(p_mp->flags & MP_DELETED));
-				return p_mp;
-			} 
+				err = __wait_on_reorg(mp, p_mp);
+				if (err) {
+					g_mp = NULL;
+					mp = ERR_PTR(EAGAIN);
+					break;
+				}
 
-			bt_page_unlock(g_mp);
-			bt_page_put(g_mp);
-
-			bt_page_lock(mp, PAGE_LOCK_SHARED);
-
-			__check_links(p_mp, mp, NULL, *indxp);
-
-			assert(!(mp->dp->flags & DP_BLEAF));
-			if (mp->flags & MP_SPLITTING ||
-				mp->flags & MP_DELETING) {
-
-				bt_page_unlock(p_mp);
-				bt_page_unlock(mp);
-				g_mp = NULL;
-
-				pthread_mutex_lock(&mp->mutex);
-				while (mp->flags & MP_SPLITTING ||
-						mp->flags & MP_DELETING) 
-					pthread_cond_wait(&mp->cond, &mp->mutex);
-				pthread_mutex_unlock(&mp->mutex);
-
-				bt_page_put(mp);
-				mp = ERR_PTR(EAGAIN);
-				break;
+				g_mp = p_mp;
+				p_mp = mp;	
+				mp = __lookup_parent_nowait(t, g_mp, p_mp, &key, indxp);
 			}
-
-			g_mp = p_mp;
-			p_mp = mp;	
-			mp = __lookup_parent_nowait(t, g_mp, p_mp, &key, indxp);
 		}
 
-		if (p_mp) {
+		if (p_mp)
 			bt_page_put(p_mp);
-		}	
-		if (g_mp) {
+		if (g_mp)
 			bt_page_put(g_mp);
-		}
 	} while (PTR_ERR(mp) == EAGAIN);
 
 	return mp;
 }
 
 static struct mpage * 
-__get_parent_locked_excl(BTREE *t, struct mpage *c_mp, indx_t *indxp)
+__get_parent_excl(BTREE *t, struct mpage *c_mp, indx_t *indxp)
 {
 	return __get_parent_locked(t, c_mp, indxp, true);
 }
 
 static struct mpage * 
-__get_parent_locked_shared(BTREE *t, struct mpage *c_mp, indx_t *indxp)
+__get_parent_shared(BTREE *t, struct mpage *c_mp, indx_t *indxp)
 {
 	return __get_parent_locked(t, c_mp, indxp, false);
 }
@@ -556,7 +419,6 @@ static int __bt_page_extend(BTREE *t, struct mpage *mp)
 	size_t size = PAGE_SIZE * mp->npg;
 	int i;
 
-	printf("Extending: %d\n", mp->pgno);
 	dp = malloc(size + PAGE_SIZE);
 	if (!dp)
 		return -ENOMEM;
@@ -573,19 +435,7 @@ static int __bt_page_extend(BTREE *t, struct mpage *mp)
 
 	mp->dp = dp;
 	mp->npg = mp->npg + 1;
-
-	pthread_mutex_lock(&splq_mutex);
-	if (!(mp->flags & MP_INSPLQ)) {
-		// printf("QQQQ splitting :%ld\n", mp->pgno);
-		TAILQ_INSERT_TAIL(&splq_head, mp, spl_entries);
-		mp->flags |= MP_INSPLQ;
-		bt_page_ref(mp);
-		pthread_cond_signal(&splq_cond);
-		assert(!(mp->flags & MP_DELETED));
-	}
-	pthread_mutex_unlock(&splq_mutex);
 	free(old_dp);
-	__check_order(mp);
 	return 0;
 }
 
@@ -616,25 +466,25 @@ static int __bt_page_shrink(BTREE *t, struct mpage *mp)
 	mp->dp = new_dp;
 	mp->npg = 1; 
 	free(dp);
-	__check_order(mp);
 	return 0;
 }
 
-static void
+static bool 
 __insert_leaf_at(BTREE *t, struct mpage *mp, const DBT *key, const DBT *val,
 				indx_t indx)
 {
-	struct dpage *dp = mp->dp;
+	struct dpage *old_dp, *dp = mp->dp;
 	size_t nbytes;
 	indx_t nxtindx;
+	int err;
 
-	assert(!(mp->flags & MP_DELETED));
 	nbytes = NDLEAFDBT(key->size, val->size);
 
-	printf("pgno: %d upper: %d lower: %d nbytes: %d\n",
-			mp->pgno, dp->upper, dp->lower, nbytes);
+	old_dp = dp;
 	if (dp->upper - dp->lower < nbytes + sizeof(indx_t)) {
-		__bt_page_extend(t, mp);
+		err = __bt_page_extend(t, mp);
+		assert(!err);
+
 		dp = mp->dp;
 	}
 
@@ -642,17 +492,16 @@ __insert_leaf_at(BTREE *t, struct mpage *mp, const DBT *key, const DBT *val,
 		memmove(dp->linp + indx + 1, dp->linp + indx,
 		    (nxtindx - indx) * sizeof(indx_t));
 	}
-	assert(indx < ((mp->npg * PAGE_SIZE) -  dp->lower) / sizeof(indx_t));
 
 	dp->lower += sizeof(indx_t);
 	dp->linp[indx] = dp->upper -= nbytes;
 
 	__wr_dleaf((void *) dp + dp->upper, key, val);
-	__check_order(mp);
+	return (dp != old_dp);
 }
 
-static void
-__remove_leaf_at(struct mpage *mp, DBT *key, indx_t indx)
+static bool 
+__remove_leaf_at(struct mpage *mp, const DBT *key, indx_t indx)
 {
 	DLEAF *dl;
 	indx_t cnt, *ip, offset;
@@ -678,10 +527,11 @@ __remove_leaf_at(struct mpage *mp, DBT *key, indx_t indx)
 	for (cnt = DP_NXTINDX(dp) - indx; --cnt; ++ip)
 		ip[0] = ip[1] < offset ? ip[1] + nbytes : ip[1];
 	dp->lower -= sizeof(indx_t);
-	__check_order(mp);
+
+	return MP_ISEMPTY(mp);
 }
 
-static void
+static bool 
 __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 {
 	DINTERNAL *di;
@@ -705,17 +555,6 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 		next_di->pgno = di->pgno;
 	}
 	
-/*
-	if (indx == 0 && DP_NXTINDX(dp) > 1) {
-		DINTERNAL *next_di;
-
-		di = GETDINTERNAL(dp, 0);
-		next_di = GETDINTERNAL(dp, 1);
-		
-		di->pgno = next_di->pgno;
-		indx = 1;
-	}
-*/
 	/* If the entry uses overflow pages, make them available for reuse. */
 	to = di = GETDINTERNAL(dp, indx);
 
@@ -734,31 +573,7 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 		ip[0] = ip[1] < offset ? ip[1] + nbytes : ip[1];
 	dp->lower -= sizeof(indx_t);
 
-
-	__check_order(mp);
-
-#if 0
-	if (DP_NXTINDX(dp) && mp->flags & MP_LEFTMOST && indx == 0) {
-		di = GETDINTERNAL(dp, 0);
-
-		nbytes = di->ksize;
-		from = (char *) dp + dp->upper;
-		to = from + nbytes;
-
-		memmove(to, from, (char *) di->bytes - from); 
-		dp->upper += nbytes;
-
-		offset = dp->linp[0];
-		for (cnt = 0; cnt < DP_NXTINDX(dp); cnt++)
-			if (dp->linp[cnt] <= offset)
-				dp->linp[cnt] += nbytes;
-
-		di = GETDINTERNAL(dp, 0);
-		di->ksize = 0;
-		fprintf(stderr, "here:%d\n", mp->pgno);
-		__check_order(mp);
-	}
-#endif
+	return MP_ISEMPTY(mp);
 }
 
 
@@ -777,110 +592,84 @@ static int __bt_get(BTREE *t, const DBT *key, const DBT *val)
 	return err;
 }
 
-pthread_mutex_t _m = PTHREAD_MUTEX_INITIALIZER;
-static int
-__bt_put(BTREE *t, const DBT *key, const DBT *val)
+static void __signal_state_change(struct mpage *mp)
 {
-	struct mpage *mp;
-	indx_t indx, indx1;
-	bool exact;
-
-	do {
-		mp = __bt_get_leaf_excl(t, key);
-		if (IS_ERR(mp)) 
-			return PTR_ERR(mp);
-
-		if (mp->npg == 15) {
-			bt_page_unlock(mp);
-			bt_page_put(mp);
-		//	pthread_mutex_unlock(&_m);
-			sleep(1);
-		//	pthread_mutex_lock(&_m);
-		} else 
-			break;
-	} while (1);
-
-	assert(!(mp->flags & MP_DELETED));
-	exact = __lookup_leaf(t, mp, key, &indx);
-	if (exact) {
-
-		bt_page_unlock(mp);
-		bt_page_put(mp);
-		return -EEXIST;
-
-		// __remove_leaf_at(mp, key, indx);
-	}
-
-	__insert_leaf_at(t, mp, key, val, indx);
-
-//	assert(__lookup_leaf(t, mp, key, &indx1));
-//	assert(indx == indx1);
-	
-	bt_page_unlock(mp);
-	bt_page_put(mp);
-	return 0;
+	pthread_mutex_lock(&mp->mutex);
+	pthread_cond_broadcast(&mp->cond);
+	pthread_mutex_unlock(&mp->mutex);
 }
 
-static int
-__bt_del(BTREE *t, const DBT *key)
+static void __set_state_deleted(struct mpage *mp)
 {
-	struct mpage *mp;
-	indx_t indx;
-	bool exact;
-	int err = 0;
-
-	mp = __bt_get_leaf_excl(t, key);
-	if (IS_ERR(mp)) 
-		return PTR_ERR(mp);
-
-	assert(!(mp->flags & MP_DELETED));
-	exact = __lookup_leaf(t, mp, key, &indx);
-	if (exact) {
-
-/*
-		DLEAF *dl = GETDLEAF(mp->dp, indx);
-		
-		assert(dl->ksize == key->size);
-		assert(!memcmp(key->data, dl->bytes, key->size));
-
-*/
-		__remove_leaf_at(mp, key, indx);
-
-//		assert(!__lookup_leaf(t, mp, key, &indx));
-
-		if (DP_NXTINDX(mp->dp) == 0) {
-
-/*
-			pthread_mutex_lock(&splq_mutex);
-			if ((mp->flags & MP_INSPLQ)) {
-				TAILQ_REMOVE(&splq_head, mp, spl_entries);
-				mp->flags &= ~MP_INSPLQ;
-			} 
-			pthread_mutex_unlock(&splq_mutex);
-				
-*/		
-			pthread_mutex_lock(&delq_mutex);
-			if (!(mp->flags & MP_INDELQ)) {
-				TAILQ_INSERT_TAIL(&delq_head, mp, del_entries);
-				mp->flags |= MP_INDELQ;
-				bt_page_ref(mp);
-				pthread_cond_signal(&delq_cond);
-				assert(!(mp->flags & MP_DELETED));
-			}
-			pthread_mutex_unlock(&delq_mutex);
-		}	
-	}
-	else { 
-		err = -ENOENT;	
-	}
-
-	bt_page_unlock(mp);
-	bt_page_put(mp);
-	return err;
+	pthread_mutex_lock(&mp->mutex);
+	printf("%d MP_STATE_DELETED\n", mp->pgno);
+	mp->state = MP_STATE_DELETED;
+	pthread_mutex_unlock(&mp->mutex);
+	pthread_cond_broadcast(&mp->cond);
 }
 
+static void __set_state_normal(struct mpage *mp)
+{
+	printf("%d MP_STATE_NORMAL\n", mp->pgno);
+	mp->state = MP_STATE_NORMAL;
+}
 
-static void  
+static void __set_state_inreorgq(struct mpage *mp)
+{
+	printf("%d MP_STATE_INREORGQ\n", mp->pgno);
+	mp->state = MP_STATE_INREORGQ;
+}
+
+void __set_state_prereorg(struct mpage *mp)
+{
+	printf("%d MP_STATE_PREREORG\n", mp->pgno);
+	mp->state = MP_STATE_PREREORG;
+}
+
+static void __set_state_reorging(struct mpage *mp)
+{
+	printf("%d MP_STATE_REORGING\n", mp->pgno);
+	mp->state = MP_STATE_REORGING;
+}
+
+static void __set_state_deleting(struct mpage *mp)
+{
+	printf("%d deleting\n", mp->pgno);
+	__set_state_reorging(mp);
+}
+
+static void __set_state_splitting(struct mpage *mp)
+{
+	printf("%d splitting\n", mp->pgno);
+	__set_state_reorging(mp);
+}
+
+static bool __insert_reorg_queue(struct mpage *mp) 
+{
+	bool inserted = false;
+	assert(mp->pgno);
+	pthread_mutex_lock(&reorg_queue_mutex);
+	if (MP_NORMAL(mp)) {
+		TAILQ_INSERT_TAIL(&reorg_queue_head, mp, reorg_queue_entry);
+		__set_state_inreorgq(mp);
+		pthread_cond_signal(&reorg_queue_cond);
+		inserted = true;
+	}
+	pthread_mutex_unlock(&reorg_queue_mutex);
+	return inserted;
+}
+
+static bool __insert_split_queue(struct mpage *mp)
+{
+	return __insert_reorg_queue(mp);
+}
+
+static bool __insert_delete_queue(struct mpage *mp)
+{
+	return __insert_reorg_queue(mp);
+}
+
+static int 
 __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left, 
 			struct mpage **out_right)
 {
@@ -948,7 +737,6 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 		nxt++;
 		ldp->linp[off] = ldp->upper -= nbytes;
 		memmove((char *)ldp + ldp->upper, src, nbytes);
-		assert(&ldp->linp[off+1] <= (char *)ldp + ldp->upper);
 
 		used += nbytes + sizeof(indx_t);
 		if (used >= half) 
@@ -979,7 +767,6 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 		nxt++;
 		rdp->linp[off] = rdp->upper -= nbytes;
 		memmove((char *)rdp + rdp->upper, src, nbytes);
-		assert(&rdp->linp[off+1] <= (char *)rdp + rdp->upper);
 	}
 	rdp->lower += off * sizeof(indx_t);
 
@@ -988,11 +775,7 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 
 	*out_left = l_mp;
 	*out_right = r_mp;
-
-	printf("->> old: %d left: %d right: %d\n", mp->pgno, l_mp->pgno, r_mp->pgno);
-	printf("old_npg: %d left_npg: %d right_npg: %d\n", mp->npg, l_mp->npg, r_mp->npg);
-	printf("left: upper: %d lower: %d flags: %x\n", ldp->upper, ldp->lower, ldp->flags);
-	printf("right: upper: %d lower: %d flags: %x\n", rdp->upper, rdp->lower, rdp->flags);
+	return 0;
 }
 
 static void __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, 
@@ -1013,39 +796,12 @@ static void __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp,
 
 	assert(DP_NXTINDX(ldp));
 	assert(DP_NXTINDX(rdp));
-
 	
 	nbytes = NDINTERNAL(0);
 	pdp->linp[0] = pdp->upper = PAGE_SIZE - nbytes;
 	dest = (char *) pdp + pdp->upper;
 	__wr_dinternal(dest, NULL, 0, lmp->pgno);
 	
-/*
-	pdp->upper = pmp->npg * PAGE_SIZE;
-
-	switch (ldp->flags & DP_TYPE) {
-	case DP_BLEAF:
-		dl = GETDLEAF(ldp, 0);
-		assert(dl->ksize && dl->ksize <= DP_MAX_KSIZE);
-		nbytes = NDINTERNAL(dl->ksize);
-		pdp->linp[0] = pdp->upper -= nbytes;
-		dest = (char *)pdp + pdp->upper;
-		__wr_dinternal(dest, dl->bytes, dl->ksize, lmp->pgno);
-		break;
-
-	case DP_BINTERNAL:
-		di = GETDINTERNAL(ldp, 0);
-		assert(di->ksize && di->ksize <= DP_MAX_KSIZE);
-		nbytes = NDINTERNAL(di->ksize);
-		pdp->linp[0] = pdp->upper -= nbytes;
-		dest = (char *)pdp + pdp->upper;
-		__wr_dinternal(dest, di->bytes, di->ksize, lmp->pgno);
-		break;
-
-	default:
-		assert(0);
-	}
-*/
 	switch (rdp->flags & DP_TYPE) {
 	case DP_BLEAF:
 		dl = GETDLEAF(rdp, 0);
@@ -1068,32 +824,18 @@ static void __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp,
 	/* There are two keys on the page. */
 	pdp->lower = DP_HDRLEN + 2 * sizeof(indx_t);
 
-	assert(pdp->lower <= pdp->upper);
-
 	/* Unpin the root page, set to btree internal page. */
 	pdp->flags = 0;
 	pdp->flags |= DP_BINTERNAL;
 
-//	pmp->flags |= MP_LEFTMOST | MP_RIGHTMOST;
 	pmp->leftmost = true;
-	printf(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>. new_level: lower:%d upper: %d\n", pdp->lower, pdp->upper);
-
-	__check_order(pmp);
-	__check_order(lmp);
-	__check_order(rmp);
-	validate(pmp);
-	validate(lmp);
-	validate(rmp);
-
-
-	__check_links(pmp, lmp, rmp, 0);
 }
 
-static void
+static bool 
 __bt_page(BTREE *t, struct mpage *mp, struct mpage *p_mp, indx_t indx,
 	struct mpage *l_mp, struct mpage *r_mp)
 {
-	struct dpage *rdp, *ldp, *pdp;
+	struct dpage *rdp, *ldp, *pdp, *old_pdp;
 	void *dest;
 	uint32_t nbytes;
 	DLEAF *dl;
@@ -1104,7 +846,7 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *p_mp, indx_t indx,
 
 	rdp = r_mp->dp;
 	ldp = l_mp->dp;
-	pdp = p_mp->dp;
+	old_pdp = pdp = p_mp->dp;
 
 	switch (rdp->flags & DP_TYPE) {
 	case DP_BINTERNAL:
@@ -1153,193 +895,93 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *p_mp, indx_t indx,
 
 	di = GETDINTERNAL(pdp, indx);
 	di->pgno = l_mp->pgno;
-
-	printf("parent: %d indx:%d old: %d left: %d right: %d\n", p_mp->pgno, indx, mp->pgno, l_mp->pgno, r_mp->pgno);
-	printf("parent_npg:%d old_npg: %d left_npg: %d right_npg: %d\n", p_mp->npg, mp->npg, l_mp->npg, r_mp->npg);
-	printf("left: upper: %d lower: %d flags: %x\n", ldp->upper, ldp->lower, ldp->flags);
-	printf("right: upper: %d lower: %d flags: %x\n", rdp->upper, rdp->lower, rdp->flags);
-
-////	for (i = 0; i < DP_NXTINDX(pdp); i++) {
-//	DINTERNAL *di = GETDINTERNAL(pdp, i);
-//		printf("%d ", di->pgno);
-//	}
-	printf ("\n");
-	__check_order(p_mp);
-	__check_order(l_mp);
-	__check_order(r_mp);
-	validate(p_mp);
-	validate(l_mp);
-	validate(r_mp);
-
-	__check_links(p_mp, l_mp, r_mp, indx);
+	return pdp != old_pdp;
 }
 
-int __bt_split(BTREE *t, struct mpage *mp)
+static int __bt_split(BTREE *t, struct mpage *mp)
 {
-	struct mpage *lmp, *rmp, *pmp, *nr_mp;
+	struct mpage *lmp, *rmp, *pmp, *new_root, *delete_mp;
 	indx_t indx;
+	bool lmp_need_split;
+	bool rmp_need_split;
+	bool pmp_need_split = false;
 	int err;
 
-	bt_page_lock(mp, PAGE_LOCK_EXCL);
-
-	assert(!(mp->flags & MP_SPLITTING));
-	assert(mp->npg > 1);
-
-	if (mp->flags & MP_DELETED ||
-		mp->flags & MP_DELETING ||
-		!DP_NXTINDX(mp->dp)) {
-
-		mp->flags &= ~MP_INSPLQ;
-		bt_page_unlock(mp);
-		return 0;
-	}
-
-/*
-	if (MP_DELETED(mp) || MP_DELETING(mp) || DP_EMPTY(mp->dp)) {
-
-		mp->flags &= ~MP_INSPLQ;
-		bt_page_unlock(mp);
-		return 0;
-	}
-*/
-	err = __bt_page_shrink(t, mp);
+	err = __bt_psplit(t, mp, &lmp, &rmp);
 	assert(!err);
 
-	if (mp->npg == 1) {
-		mp->flags &= ~MP_INSPLQ;
-		bt_page_unlock(mp);
-		return 0;
-	}
-
-	mp->flags |= MP_SPLITTING;
-	mp->flags &= ~MP_INSPLQ;
-	bt_page_unlock(mp);
-
-	__bt_psplit(t, mp, &lmp, &rmp);
-
-	printf("Splitting :%ld\n", mp->pgno);
-	
-	nr_mp = NULL;
+	delete_mp = new_root = NULL;
 	do {
-		pmp = __get_parent_locked_excl(t, mp, &indx);
-		if (IS_ERR(pmp))
+		pmp = __get_parent_excl(t, mp, &indx);
+		if (IS_ERR(pmp)) {
+			assert(0);
 			return PTR_ERR(pmp);
+		}
 
-		assert (pmp->npg < 15); 
-
-		if (pmp->flags & MP_METADATA) {
+		if (MP_METADATA(pmp)) {
 			
-			assert(pmp->pgno == 0);
-			if (!nr_mp) {
+			assert(pmp->pgno == BT_MDPGNO);
+
+			if (!new_root) {
+
 				bt_page_unlock(pmp);
 				bt_page_put(pmp);
+				pmp = NULL;
 
-				nr_mp = bt_page_new(1);
-				if (IS_ERR(nr_mp)) 
-					return PTR_ERR(nr_mp);
-				continue;
+				delete_mp = new_root = bt_page_new(1);
+				if (IS_ERR(new_root)) {
+					assert(0);
+					return PTR_ERR(new_root);
+				}
+			} else {
+				__bt_root(t, mp, new_root, lmp, rmp);
+				pmp->md->root_pgno = new_root->pgno;
+				
+				delete_mp = NULL;
 			}
-			__bt_root(t, mp, nr_mp, lmp, rmp);
-			pmp->md->root_pgno = nr_mp->pgno;
-			printf("SETTING NEW ROOT: %d\n", pmp->md->root_pgno);
 		} else {
-
-			if (nr_mp)
-				nr_mp->flags |= MP_DELETED;
-
-			__bt_page(t, mp, pmp, indx, lmp, rmp);
+			pmp_need_split = __bt_page(t, mp, pmp, indx, lmp, rmp);
 		}
-		break;
-	} while (1);
+	} while (!pmp);
 	
-	if (lmp->npg > 1) {
-		pthread_mutex_lock(&splq_mutex);
-		if (!(lmp->flags & MP_INSPLQ)) {
-			// printf("QQQQ splitting :%ld\n", mp->pgno);
-			TAILQ_INSERT_TAIL(&splq_head, lmp, spl_entries);
-			lmp->flags |= MP_INSPLQ;
-			bt_page_ref(lmp);
-			pthread_cond_signal(&splq_cond);
-			assert(!(lmp->flags & MP_DELETED));
-		}
-		pthread_mutex_unlock(&splq_mutex);
-	}
-	if (rmp->npg > 1) {
-		pthread_mutex_lock(&splq_mutex);
-		if (!(rmp->flags & MP_INSPLQ)) {
-			// printf("QQQQ splitting :%ld\n", mp->pgno);
-			TAILQ_INSERT_TAIL(&splq_head, rmp, spl_entries);
-			rmp->flags |= MP_INSPLQ;
-			bt_page_ref(rmp);
-			pthread_cond_signal(&splq_cond);
-			assert(!(rmp->flags & MP_DELETED));
-		}
-		pthread_mutex_unlock(&splq_mutex);
-	}
+	lmp_need_split = MP_NEED_SPLIT(lmp);
+	rmp_need_split = MP_NEED_SPLIT(rmp);
 	bt_page_unlock(pmp);
 
-	bt_page_lock(mp, PAGE_LOCK_EXCL);
-	pthread_mutex_lock(&mp->mutex);	
-	mp->flags &= ~MP_SPLITTING;
-	mp->flags |= MP_DELETED;
-	pthread_cond_broadcast(&mp->cond);
-	pthread_mutex_unlock(&mp->mutex);		
-	bt_page_unlock(mp);
+	__set_state_deleted(mp);
 
-	if (nr_mp) 
-		bt_page_put(nr_mp);
-	bt_page_put(lmp);
-	bt_page_put(rmp);
-	bt_page_put(pmp);
+	if (!lmp_need_split || !__insert_split_queue(lmp))
+		bt_page_put(lmp);
+
+	if (!rmp_need_split || !__insert_split_queue(rmp))
+		bt_page_put(rmp);
+
+	if (!pmp_need_split || !__insert_split_queue(pmp))
+		bt_page_put(pmp);
+
+	if (delete_mp) 
+		__set_state_deleted(delete_mp);
+	if (new_root) 
+		bt_page_put(new_root);
 	return 0;
 }
 
-int __bt_delete(BTREE *t, struct mpage *mp)
+struct mpage * __bt_delete(BTREE *t, struct mpage *mp)
 {
 	struct mpage *pmp;
 	struct dpage *dp;
 	indx_t indx;
 	int i;
+	bool empty;
 
-	bt_page_lock(mp, PAGE_LOCK_EXCL);
-	
-	if (mp->flags & MP_DELETED ||
-		mp->flags & MP_SPLITTING) {
-
-		mp->flags &= ~MP_INDELQ;
-		bt_page_unlock(mp);
-		return 0;
-	}
-
-	dp = mp->dp;
-	if (!DP_NXTINDX(dp)) {
-		mp->flags |= MP_DELETING;
-		mp->flags &= ~MP_INDELQ;
-	} else {
-		if (mp->npg > 1 && !(mp->flags & MP_INSPLQ)) {
-
-			pthread_mutex_lock(&splq_mutex);
-			if (!(mp->flags & MP_INSPLQ)) {
-				// printf("QQQQ splitting :%ld\n", mp->pgno);
-				TAILQ_INSERT_TAIL(&splq_head, mp, spl_entries);
-				mp->flags |= MP_INSPLQ;
-				bt_page_ref(mp);
-				pthread_cond_signal(&splq_cond);
-			}
-			pthread_mutex_unlock(&splq_mutex);
-		}
-		mp->flags &= ~MP_INDELQ;
-		bt_page_unlock(mp);
-		return 0;
-	}
-	bt_page_unlock(mp);
-
-	pmp = __get_parent_locked_excl(t, mp, &indx);
+	pmp = __get_parent_excl(t, mp, &indx);
 	if (IS_ERR(pmp))
-		return PTR_ERR(pmp);
+		return pmp;
 
-	if (pmp->flags & MP_METADATA) {
+	if (MP_METADATA(pmp)) {
+
 		bt_page_unlock(pmp);
+		bt_page_put(pmp);
 
 		bt_page_lock(mp, PAGE_LOCK_EXCL);
 
@@ -1348,261 +990,224 @@ int __bt_delete(BTREE *t, struct mpage *mp)
 		dp->flags &= ~DP_BINTERNAL;
 		dp->flags |= DP_BLEAF;
 		dp->lower = DP_HDRLEN;
-		dp->upper = mp->npg * PAGE_SIZE;
-
-		pthread_mutex_lock(&mp->mutex);	
-		mp->flags &= ~MP_DELETING;
-		pthread_cond_broadcast(&mp->cond);
-		pthread_mutex_unlock(&mp->mutex);		
-
+		dp->upper = mp->npg * PAGE_SIZE; /* xxx: extened ? */
 		bt_page_unlock(mp);
-		bt_page_put(pmp);
-		return 0;
+
+		__set_state_normal(mp);
+		/* xxx: signal state change. */
+		return NULL;
 	} else {
-		__remove_internal_at(pmp, NULL, indx);
-//		for (i = 0; i < DP_NXTINDX(pmp->dp); i++) {
-//			DINTERNAL *di = GETDINTERNAL(pmp->dp, i);
-//			assert(di->pgno != mp->pgno);
-//		}
-		__check_order(pmp);
-		if (DP_NXTINDX(pmp->dp) == 0) {
-			pthread_mutex_lock(&delq_mutex);
-			if (!(pmp->flags & MP_INDELQ)) {
-		// printf("QQQQ splitting :%ld\n", mp->pgno);
-				TAILQ_INSERT_TAIL(&delq_head, pmp, del_entries);
-				pmp->flags |= MP_INDELQ;
-				bt_page_ref(pmp);
-				pthread_cond_signal(&delq_cond);
-				assert(!(pmp->flags & MP_DELETED));
-			}
-			pmp->flags |= MP_DELETING;
-			pthread_mutex_unlock(&delq_mutex);
-		}	
+		empty = __remove_internal_at(pmp, NULL, indx);
+		
+		if (empty) {
+			__set_state_deleting(pmp);
+			bt_page_unlock(pmp);
+
+			__set_state_deleted(mp);
+			return pmp;
+		} else {
+			bt_page_unlock(pmp);
+
+			__set_state_deleted(mp);
+			bt_page_put(pmp);
+			return NULL;
+		}
 	}
-	bt_page_unlock(pmp);
+}
+
+int __bt_delete_leaf(BTREE *t, struct mpage *mp)
+{
+	struct mpage *pmp;
+
+	pmp = __bt_delete(t, mp);
+
+	while ((mp = pmp) && !IS_ERR(mp)) {
+
+		pmp = __bt_delete(t, mp);
+		if (IS_ERR(pmp)) {
+			assert(0);
+		}
+
+		bt_page_put(mp);
+	} 
+	return PTR_ERR(mp);
+}
+
+int __bt_reorg_delete(BTREE *t, struct mpage *mp)
+{
+	__set_state_deleting(mp);
+	bt_page_unlock(mp);
+		
+	return __bt_delete_leaf(t, mp);
+}
+
+int __bt_reorg_split(BTREE *t, struct mpage *mp)
+{
+	int err;
+
+	err = __bt_page_shrink(t, mp);
+	if (err) {
+		assert(0);
+		bt_page_unlock(mp);
+		return err;
+	}
+
+	if (MP_NEED_SPLIT(mp)) { 
+		__set_state_splitting(mp);
+		bt_page_unlock(mp);
+
+		return __bt_split(t, mp);
+	} else {
+		__set_state_normal(mp);
+		bt_page_unlock(mp);
+
+		__signal_state_change(mp);
+		return 0;
+	}
+}
+
+int __bt_reorg(BTREE *t, struct mpage *mp)
+{
+	struct mpage *lmp, *rmp, *pmp, *new_root;
+	indx_t indx;
+	int err;
 
 	bt_page_lock(mp, PAGE_LOCK_EXCL);
-	pthread_mutex_lock(&mp->mutex);	
-	mp->flags &= ~MP_DELETING;
-	mp->flags |= MP_DELETED;
-	pthread_cond_broadcast(&mp->cond);
-	pthread_mutex_unlock(&mp->mutex);		
+
+	if (MP_ISEMPTY(mp)) {
+		return __bt_reorg_delete(t, mp);
+	} else {
+		return __bt_reorg_split(t, mp);
+	}
+}
+
+int __bt_split_inline(BTREE *t, struct mpage *mp)
+{
+	int err;
+	pthread_mutex_lock(&reorg_queue_mutex);
+	if (mp->state == MP_STATE_INREORGQ) { 
+		TAILQ_REMOVE(&reorg_queue_head, mp, reorg_queue_entry);
+		__set_state_prereorg(mp);
+		pthread_mutex_unlock(&reorg_queue_mutex);
+
+		bt_page_put(mp);
+
+		err = __bt_reorg(t, mp);
+		assert(!err);
+		return err;
+	} else {
+		pthread_mutex_unlock(&reorg_queue_mutex);
+		
+		pthread_mutex_lock(&mp->mutex);
+		while (MP_REORGING(mp) || MP_PREREORG(mp))
+			pthread_cond_wait(&mp->cond, &mp->mutex);
+		pthread_mutex_unlock(&mp->mutex);
+		return 0;
+	}
+}
+
+static int
+__bt_put(BTREE *t, const DBT *key, const DBT *val)
+{
+	struct mpage *mp;
+	indx_t indx, indx1;
+	bool exact, extended;
+	int err;
+
+	mp = __bt_get_leaf_excl(t, key);
+	if (IS_ERR(mp)) 
+		return PTR_ERR(mp);
+	
+	while (MP_ISFULL(mp)) {
+		assert(mp->npg <= 15);
+		bt_page_unlock(mp);
+
+		err = __bt_split_inline(t, mp);			
+		assert(err == 0);
+	
+		bt_page_put(mp);
+
+		mp = __bt_get_leaf_excl(t, key);
+		if (IS_ERR(mp)) 
+			return PTR_ERR(mp);
+	}
+
+	exact = __lookup_leaf(t, mp, key, &indx);
+	if (exact) {
+
+		bt_page_unlock(mp);
+		bt_page_put(mp);
+		return -EEXIST;
+
+		// __remove_leaf_at(mp, key, indx);
+	}
+
+	extended = __insert_leaf_at(t, mp, key, val, indx);
 	bt_page_unlock(mp);
-	bt_page_put(pmp);
+
+	if (!extended || !__insert_split_queue(mp))
+		bt_page_put(mp);
 	return 0;
 }
 
+static int
+__bt_del(BTREE *t, const DBT *key)
+{
+	struct mpage *mp;
+	indx_t indx;
+	bool exact, empty = false;
+	int err = 0;
+
+	mp = __bt_get_leaf_excl(t, key);
+	if (IS_ERR(mp)) 
+		return PTR_ERR(mp);
+
+	exact = __lookup_leaf(t, mp, key, &indx);
+	if (exact) {
+		empty = __remove_leaf_at(mp, key, indx);
+	} else { 
+		err = -ENOENT;	
+	}
+	bt_page_unlock(mp);
+
+	if (!empty || !__insert_delete_queue(mp))
+		bt_page_put(mp);
+	return err;
+}
+	
 int exito;
 
-void *splitter(void *arg)
+void *reorganiser(void *arg)
 {
 	int err;
 	BTREE *t = (BTREE *) arg;
 	struct mpage *mp;
 
 	while (1) {
-		pthread_mutex_lock(&splq_mutex);
-		while ((mp = splq_head.tqh_first) == NULL && !exito)
-			pthread_cond_wait(&splq_cond, &splq_mutex);
+		pthread_mutex_lock(&reorg_queue_mutex);
+		while ((mp = reorg_queue_head.tqh_first) == NULL && !exito)
+			pthread_cond_wait(&reorg_queue_cond, &reorg_queue_mutex);
 
-		if (mp)
-		   	TAILQ_REMOVE(&splq_head, mp, spl_entries);
-		pthread_mutex_unlock(&splq_mutex);
+		if (mp) {
+		   	TAILQ_REMOVE(&reorg_queue_head, mp, reorg_queue_entry);
+			__set_state_prereorg(mp);
+		}
+		pthread_mutex_unlock(&reorg_queue_mutex);
 
 		if (!mp) break;
-	//	pthread_mutex_lock(&_m);
-		err = __bt_split(t, mp);
-	//	pthread_mutex_unlock(&_m);
+
+		err = __bt_reorg(t, mp);
 		assert(!err);
+
 		bt_page_put(mp);
 	}
 }
-
-void *deleter(void *arg)
-{
-	int err;
-	BTREE *t = (BTREE *) arg;
-	struct mpage *mp;
-
-	while (1) {
-//		sleep(1); continue;
-		pthread_mutex_lock(&delq_mutex);
-		while ((mp = delq_head.tqh_first) == NULL && !exito)
-			pthread_cond_wait(&delq_cond, &delq_mutex);
-
-		if (mp)
-			TAILQ_REMOVE(&delq_head, mp, del_entries);
-		pthread_mutex_unlock(&delq_mutex);
-
-		if (!mp) break;
-		err = __bt_delete(t, mp);
-		assert(!err);
-		bt_page_put(mp);
-	}
-}
-
-
-#if 0
-static jjj = 0;
-
-pthread_mutex_t _mutex = PTHREAD_MUTEX_INITIALIZER;
-
-
-void *inserter(void *arg)
-{
-	BTREE *t = (BTREE *) arg;
-	char vb[250];
-	char kb[250];
-
-
-	unsigned long k;
-
-	pthread_mutex_lock(&_mutex);
-	k = ++jjj;
-	pthread_mutex_unlock(&_mutex);
-
-	printf("CHOOSING K:%d\n", k);
-
-
-	while (1) {
-		DBT key, val;
-		unsigned int rr = random();
-		
-		*(unsigned long *) kb = rr / 16 + k;
-		*(unsigned long *) vb = rr / 16 + k;
-
-		key.data = kb;
-		key.size = 50;
-
-		val.data = vb;
-		val.size = 250;
-
-		err = __bt_put(t, &key, &val);
-		assert(!err);
-	}
-}
-
-void *test1(void *arg)
-{
-	BTREE *t = (BTREE *) arg;
-	int err;
-	unsigned long i, j;
-	char vv[250];
-	char kkk[200];
-
-	unsigned long k;
-	pthread_mutex_lock(&_mutex);
-	k = ++jjj;
-	pthread_mutex_unlock(&_mutex);
-
-	printf("CHOOSING K:%d\n", k);
-
-	for (i = 0; i < 10000; i++) {
-
-		unsigned long kk = k * 1000000000 + i;
-		DBT key, val;
-
-		*(unsigned long *) kkk = kk;
-		key.data = kkk;
-		key.size = 50;//200;
-
-		val.data =(void *) vv;
-		val.size = 250;
-
-	//	pthread_mutex_lock(&_m);
-		err = __bt_put(t, &key, &val);
-		assert(!err);
-
-
-	for (j = 0; j <= 0; j++) {
-
-		unsigned long k1k = k * 1000000000 + j;
-		DBT key, val;
-
-		*(unsigned long *) kkk = k1k;
-		key.data = kkk;
-		key.size = 50;//200;
-
-		val.data = (void *)vv;
-		val.size = 250;
-
-		err = __bt_get(t, &key, &val);
-		assert(!err);
-
-		//printf("%d\n", j);
-	}
-
-
-
-	if (i == 10000-1) printf("sleeeeeping\n");
-		//pthread_mutex_unlock(&_m);
-
-	}
-
-	sleep(0);
-	printf ("starting looooookup\n");
-	for (i = 0; i < 10000; i++) {
-
-		unsigned long kk = k * 1000000000 + i;
-		DBT key, val;
-
-		*(unsigned long *) kkk = kk;
-		key.data = kkk;
-		key.size = 50;
-
-		val.data = (void *)vv;
-		val.size = 250;
-
-		err = __bt_get(t, &key, &val);
-		assert(!err);
-
-		//printf("%d\n", j);
-	}
-
-	for (i = 0; i < 10000; i++) {
-
-		unsigned long kk = k * 1000000000 + i;
-		DBT key, val;
-
-		*(unsigned long *) kkk = kk;
-		key.data = kkk;
-		key.size = 50;
-
-		val.data = (void *)vv;
-		val.size = 250;
-
-		err = __bt_del(t, &key);
-		assert(!err);
-
-		//printf("%d\n", j);
-	}
-
-
-
-//	sleep(5);
-	{
-		unsigned long k1k = k * 1000000000 + j;
-		DBT key, val;
-
-		*(unsigned long *) kkk = k1k;
-		key.data = kkk;
-		key.size = 50;//200;
-
-		val.data = (void *)vv;
-		val.size = 250;
-
-//		err = __bt_get(t, &key, &val);
-//		assert(!err);
-	}
-
-	printf("done\n");
-}
-#endif
 	
 BTREE tt, *t = &tt;
 
 #define MAX_ELE     (1000000)
-#define MAX_THREAD  (64)
+#define MAX_THREAD  (64) 
+#define NORG 16
 
 #define MAX_REGIONS (MAX_ELE/(3*MAX_THREAD))
 
@@ -1656,12 +1261,8 @@ static void *looker(
 			vv.data = vb;
 			vv.size = 250;
 
-	//		*(uint32_t *)key_real = key;
-			
 			err = __bt_get(t, &kk, &vv);
 
-			//err = oca_btree_lookup(obth, (void*)key_real, NULL);
-			//
 			if (!err) {
 				if (!pt) assert(bitmap[key/8]&(1<<(key%8)));
 			} else if (err == -ENOENT) {
@@ -1706,8 +1307,6 @@ static void *inserter(
 
 			b[by]|=(1<<bi);
 
-//			*(uint32_t *)key_real = key;
-
 			*(uint32_t *) kb = key;
 			kk.data = kb;
 			kk.size = 32;
@@ -1717,13 +1316,10 @@ static void *inserter(
 			vv.data = vb;
 			vv.size = 250;
 
-//			err = oca_btree_update(obth, (void*)key_real, (void *)key_real);
 			err = __bt_put(t, &kk, &vv);
 			if (!err) {	
 
 				if (!pt) assert(!(bitmap[key/8]&(1<<(key%8))));
-//				assert(!__bt_get(t, &kk, &vv));
-				//bitmap[key/8]|=(1<<(key%8));
 				__sync_fetch_and_or(&bitmap[key/8], 1<<(key%8));
 
 			} else if (err == -EEXIST) {
@@ -1772,14 +1368,9 @@ static void *deleter0(
 			kk.data = kb;
 			kk.size = 32;
 
-
-//			*(uint32_t*)key_real = key;
-//			err = oca_btree_remove(obth, (void*)key_real, NULL);
 			err = __bt_del(t, &kk);
 			if (!err) {
 				if (!pt) assert(bitmap[key/8]&(1<<(key%8)));
-//				bitmap[key/8]&=~(1U<<(key%8));
-
 				__sync_fetch_and_and(&bitmap[key/8], ~(1U<<(key%8)));
 			} else if (err == -ENOENT) {
 				if (!pt) assert(!(bitmap[key/8]&(1<<(key%8))));
@@ -1799,23 +1390,6 @@ void test(void)
 {
 	uint32_t k;
 	pthread_t lthread[MAX_THREAD],ithread[MAX_THREAD],dthread[MAX_THREAD];
-
-	/*
-	for (k=0;k<MAX_ELE;k++) {
-
-		char k1[32] = {};
-
-		*(uint32_t*)k1 = k;
-		
-		err = oca_btree_lookup(obth, (void*)k1, NULL);
-		if (!OCA_IS_ERROR(err)) {
-			bitmap[k/8]|=(1<<(k%8));
-		} else if (err != ERRNO_ENOENT) {
-			assert(0);
-			printf("error in initial lookup.\n");
-		} 
-	}
-	*/
 
 	for (k=0; k<1000; k++)  {
 		unsigned long i;
@@ -1845,7 +1419,6 @@ void test(void)
 		fprintf(stdout, "DONE.\n");
 		si = (si+1)%6;
 	}
-	return 0;
 }
 
 int main()
@@ -1853,8 +1426,7 @@ int main()
 	struct mpage *mp, *mp_md;
 	struct dpage *dp;
 	pthread_t testers[16];
-	pthread_t splitters[16];
-	pthread_t deleters[16];
+	pthread_t reorganisers[NORG];
 	int i;
 
 	tt.bt_cmp = __bt_defcmp;
@@ -1865,7 +1437,7 @@ int main()
 		return PTR_ERR(mp_md);
 	}
 	mp_md->flags = 0;
-	mp_md->flags |= MP_METADATA;
+	MP_SET_METADATA(mp_md);
 
 	mp = bt_page_new(1);
 	if (IS_ERR(mp)) {
@@ -1884,43 +1456,19 @@ int main()
 
 	bt_page_put(mp_md);
 
-	TAILQ_INIT(&splq_head);
-	TAILQ_INIT(&delq_head);
+	TAILQ_INIT(&reorg_queue_head);
 
-	pthread_mutex_init(&splq_mutex, NULL);
-	pthread_cond_init(&splq_cond, NULL);
+	pthread_mutex_init(&reorg_queue_mutex, NULL);
+	pthread_cond_init(&reorg_queue_cond, NULL);
 
-	pthread_mutex_init(&delq_mutex, NULL);
-	pthread_cond_init(&delq_cond, NULL);
+	for (i = 0; i < NORG; i++) 
+		pthread_create(&reorganisers[i], NULL, reorganiser, t);
 
-
-
-	for (i = 0; i < 16; i++) 
-		pthread_create(&splitters[i], NULL, splitter, t);
-
-	for (i = 0; i < 16; i++) 
-		pthread_create(&deleters[i], NULL, deleter, t);
-
-	/*
-	for (i = 0; i < 16; i++) {
-		pthread_create(&testers[i], NULL, test, (void *) &t);
-	}
-
-
-
-	for (i = 0; i < 16; i++) 
-		pthread_join(testers[i], NULL);
-*/
 	test();
 
 	exito = 1;
-	pthread_cond_broadcast(&splq_cond);
-	pthread_cond_broadcast(&delq_cond);
-
-	//sleep(100);
+	pthread_cond_broadcast(&reorg_queue_cond);
 	
-	for (i = 0; i < 16; i++) 
-		pthread_join(splitters[i], NULL);
-	for (i = 0; i < 16; i++) 
-		pthread_join(deleters[i], NULL);
+	for (i = 0; i < NORG; i++) 
+		pthread_join(reorganisers[i], NULL);
 }

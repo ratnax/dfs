@@ -37,47 +37,57 @@ struct dpage {
 };
 
 /* First and next index. */
-#define	DP_HDRLEN 	sizeof(struct dpage)
+#define	DP_HDRLEN 		sizeof(struct dpage)
 #define	DP_NXTINDX(p)	(((p)->lower - DP_HDRLEN) / sizeof(indx_t))
-
 
 struct metadata {
 	uint64_t root_pgno;
 };
 
-typedef int lock_type_t;
+typedef enum { PAGE_LOCK_SHARED, PAGE_LOCK_EXCL } lock_type_t;
+typedef enum { 
+	MP_STATE_NORMAL,
+	MP_STATE_INREORGQ,
+	MP_STATE_PREREORG,
+	MP_STATE_REORGING,
+	MP_STATE_DELETED
+} mp_state_t;
 
 /* in-mem btree page */
 struct mpage {
 	pgno_t	pgno;
 	pthread_rwlock_t lock;
-#define MP_DIRTY 		0x1
-#define MP_SPLITTING 	0X2
-#define MP_LEFTMOST 	0x4
-#define MP_RIGHTMOST 	0x8
-#define MP_BIGPAGE 		0x10
-#define MP_METADATA		0x20
-#define MP_DELETING		0x40
-#define MP_DELETED		0x80
-#define MP_INSPLQ 		0x100
-#define MP_INDELQ 		0x200
 	bool leftmost;
-
+	mp_state_t state;
+#define MP_FLAG_METADATA 0x1
+	uint32_t flags;
 	int writers;
 	int readers;
-	uint32_t flags;
 	uint32_t npg;
 	int32_t count;
 	pthread_cond_t cond;
 	pthread_mutex_t mutex;
-	TAILQ_ENTRY(mpage) spl_entries;
-	TAILQ_ENTRY(mpage) del_entries;
+	TAILQ_ENTRY(mpage) reorg_queue_entry;
 	union {
 		struct dpage *dp;
 		struct metadata *md;
 		void *p;
 	};
 };
+
+#define MP_NORMAL(mp)		((mp)->state == MP_STATE_NORMAL)
+#define MP_INREORGQ(mp)		((mp)->state == MP_STATE_INREORGQ)
+#define MP_PREREORG(mp)		((mp)->state == MP_STATE_PREREORG)
+#define MP_REORGING(mp)		((mp)->state == MP_STATE_REORGING)
+#define MP_DELETED(mp)		((mp)->state == MP_STATE_DELETED)
+
+#define MP_METADATA(mp)		((mp)->flags & MP_FLAG_METADATA)
+#define MP_SET_METADATA(mp)	(mp)->flags |= MP_FLAG_METADATA
+
+#define DP_UNUSED(dp)	((dp)->upper - (dp)->lower)
+#define MP_ISFULL(mp)	((mp)->npg == 15 && DP_UNUSED((mp)->dp) < PAGE_SIZE)
+#define MP_EXTENDED(mp)		((mp)->npg > 1)
+#define MP_NEED_SPLIT(mp)	(MP_EXTENDED(mp))
 
 typedef struct dinternal {
 	uint64_t ksize:8;
@@ -106,6 +116,13 @@ typedef struct dleaf {
 /* Get the number of bytes in the entry. */
 #define NDLEAF(p)	NDLEAFDBT((p)->ksize, (p)->dsize)
 
+
+#define DP_ISEMPTY(dp) ((dp)->lower == DP_HDRLEN)
+#define MP_ISEMPTY(mp) (DP_ISEMPTY((mp)->dp))
+
+#define MP_ISLEAF(mp) 		((mp)->dp->flags & DP_BLEAF)
+#define MP_ISINTERNAL(mp) 	((mp)->dp->flags & DP_BINTERNAL)
+
 typedef struct BTREE_s {
 	int (*bt_cmp)(const DBT *a, const DBT *b);
 } BTREE;
@@ -128,9 +145,6 @@ static inline long IS_ERR(const void *ptr)
 		return IS_ERR_VALUE((unsigned long)ptr);
 }
 
-#define PAGE_LOCK_SHARED 1
-#define PAGE_LOCK_EXCL   2
-
 #define P_MDPGNO 0
 #define DP_MAX_KSIZE 256
 #define DP_MAX_DSIZE 256
@@ -141,6 +155,11 @@ static inline long IS_ERR(const void *ptr)
 #define PAGE_MASK (PAGE_SIZE - 1)
 
 
-
-
-
+extern struct mpage *bt_page_get_nowait(uint64_t pgno);
+extern struct mpage *bt_page_get(uint64_t pgno);
+extern void bt_page_lock(struct mpage *mp, lock_type_t type);
+extern void bt_page_unlock(struct mpage *mp);
+extern struct mpage *bt_page_new(int npg);
+extern void bt_page_put(struct mpage *mp);
+extern void bt_page_ref(struct mpage *mp);
+extern int bt_page_init(void);

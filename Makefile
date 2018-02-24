@@ -1,5 +1,5 @@
-CFLAGS=-Wfatal-errors -O3
-LDFLAGS="-lpthread"
+CFLAGS=-Wfatal-errors -O3 
+LDFLAGS=-lpthread
 
 t: t_mem.o mp_mem.o
 	gcc -o t t_mem.o mp_mem.o $(CFLAGS) $(LDFLAGS)

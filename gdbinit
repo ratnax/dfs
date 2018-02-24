@@ -1,33 +1,18 @@
 define mp_flags
-	if $arg0->flags & 0x1
-		printf "MP_DIRTY "
+	if $arg0->state == MP_STATE_NORMAL
+		printf "NORMAL"
 	end
-	if $arg0->flags & 0x2
-		printf "MP_SPLITTING "
+	if $arg0->state == MP_STATE_INREORGQ
+		printf "INREORGQ"
 	end
-	if $arg0->flags & 0X4
-		printf "MP_LEFTMOST "
+	if $arg0->state == MP_STATE_PREREORG
+		printf "PREREORG"
 	end
-	if $arg0->flags & 0x8
-		printf "MP_RIGHTMOST "
+	if $arg0->state == MP_STATE_REORGING
+		printf "REORGING"
 	end
-	if $arg0->flags & 0x10
-		printf "MP_BIGPAGE "
-	end
-	if $arg0->flags & 0x20
-		printf "MP_METADATA "
-	end
-	if $arg0->flags & 0x40
-		printf "MP_DELETING "	
-	end
-	if $arg0->flags & 0x80
-		printf "MP_DELETED "	
-	end
-	if $arg0->flags & 0x100
-		printf "MP_INSPLQ "	
-	end
-	if $arg0->flags & 0x200
-		printf "MP_INDELQ "	
+	if $arg0->state == MP_STATE_DELETED
+		printf "DELETED"
 	end
 end
 
@@ -45,10 +30,10 @@ define list_pages
 	while $i < 102400
 		printf "pgno: %d ", mp_pages[$i].pgno
 		mp_flags mp_pages[$i]	
-		printf "npg: %d count: %d ",mp_pages[$i].npg, mp_pages[$i].count
+		printf " npg: %d count: %d ",mp_pages[$i].npg, mp_pages[$i].count
 		
 		if mp_pages[$i].dp
-			if mp_pages[$i].flags & 0x20 
+			if mp_pages[$i].flags & 0x1 
 				printf "METADATA root_pgno: %d", mp_pages[$i].md.root_pgno
 			else
 				dp_flags mp_pages[$i].dp
