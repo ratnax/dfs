@@ -196,6 +196,7 @@ static struct mpage * __bt_get_root(struct mpage *md_pg)
 struct mpage *__get_md_page(void)
 {
 	struct mpage *mp;
+
 	mp = bt_page_get(P_MDPGNO);
 	if (IS_ERR(mp))
 		return mp;
@@ -379,6 +380,7 @@ __get_parent_locked(BTREE *t, struct mpage *c_mp, indx_t *indxp, bool excl)
 
 				bt_page_lock(mp, PAGE_LOCK_SHARED);
 
+				assert(MP_ISINTERNAL(mp));
 				err = __wait_on_reorg(mp, p_mp);
 				if (err) {
 					g_mp = NULL;
@@ -902,8 +904,8 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 {
 	struct mpage *lmp, *rmp, *pmp, *new_root, *delete_mp;
 	indx_t indx;
-	bool lmp_need_split;
-	bool rmp_need_split;
+	bool lmp_need_split = false;
+	bool rmp_need_split = false;
 	bool pmp_need_split = false;
 	int err;
 
@@ -917,6 +919,22 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 			assert(0);
 			return PTR_ERR(pmp);
 		}
+
+		while (MP_ISFULL(pmp)) {
+			assert(pmp->npg <= 15);
+			__set_state_reorging(pmp);
+			bt_page_unlock(pmp);
+
+			err = __bt_split(t, pmp);
+			assert(err == 0);
+	
+			bt_page_put(pmp);
+
+			pmp = __get_parent_excl(t, mp, &indx);
+			if (IS_ERR(pmp)) 
+				return PTR_ERR(pmp);
+		}
+
 
 		if (MP_METADATA(pmp)) {
 			
@@ -944,11 +962,18 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 		}
 	} while (!pmp);
 	
-	lmp_need_split = MP_NEED_SPLIT(lmp);
-	rmp_need_split = MP_NEED_SPLIT(rmp);
+	if (MP_ISLEAF(mp)) {
+		lmp_need_split = MP_NEED_SPLIT(lmp);
+		rmp_need_split = MP_NEED_SPLIT(rmp);
+	}
 	bt_page_unlock(pmp);
 
 	__set_state_deleted(mp);
+
+	if (delete_mp) 
+		__set_state_deleted(delete_mp);
+	if (new_root) 
+		bt_page_put(new_root);
 
 	if (!lmp_need_split || !__insert_split_queue(lmp))
 		bt_page_put(lmp);
@@ -956,13 +981,8 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 	if (!rmp_need_split || !__insert_split_queue(rmp))
 		bt_page_put(rmp);
 
-	if (!pmp_need_split || !__insert_split_queue(pmp))
-		bt_page_put(pmp);
+	bt_page_put(pmp);
 
-	if (delete_mp) 
-		__set_state_deleted(delete_mp);
-	if (new_root) 
-		bt_page_put(new_root);
 	return 0;
 }
 
@@ -1074,6 +1094,7 @@ int __bt_reorg(BTREE *t, struct mpage *mp)
 
 	bt_page_lock(mp, PAGE_LOCK_EXCL);
 
+	assert(MP_ISLEAF(mp));
 	if (MP_ISEMPTY(mp)) {
 		return __bt_reorg_delete(t, mp);
 	} else {
@@ -1081,11 +1102,11 @@ int __bt_reorg(BTREE *t, struct mpage *mp)
 	}
 }
 
-int __bt_split_inline(BTREE *t, struct mpage *mp)
+int __bt_split_leaf_inline(BTREE *t, struct mpage *mp)
 {
 	int err;
 	pthread_mutex_lock(&reorg_queue_mutex);
-	if (mp->state == MP_STATE_INREORGQ) { 
+	if (MP_INREORGQ(mp)) {
 		TAILQ_REMOVE(&reorg_queue_head, mp, reorg_queue_entry);
 		__set_state_prereorg(mp);
 		pthread_mutex_unlock(&reorg_queue_mutex);
@@ -1122,7 +1143,7 @@ __bt_put(BTREE *t, const DBT *key, const DBT *val)
 		assert(mp->npg <= 15);
 		bt_page_unlock(mp);
 
-		err = __bt_split_inline(t, mp);			
+		err = __bt_split_leaf_inline(t, mp);			
 		assert(err == 0);
 	
 		bt_page_put(mp);
@@ -1207,71 +1228,68 @@ BTREE tt, *t = &tt;
 
 #define MAX_ELE     (1000000)
 #define MAX_THREAD  (64) 
-#define NORG 16
 
-#define MAX_REGIONS (MAX_ELE/(3*MAX_THREAD))
+#define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
 
-char bitmap[MAX_ELE/8+1];
+char bitmap[MAX_ELE / 8 + 1];
 
-int switcher[][3] = { {0,1,2},
-                      {0,2,1},
-                      {1,0,2},
-                      {1,2,0},
-                      {2,0,1},
-                      {2,1,0} };
+int switcher[][3] = { {0, 1, 2},
+                      {0, 2, 1},
+                      {1, 0, 2},
+                      {1, 2, 0},
+                      {2, 0, 1},
+                      {2, 1 ,0} };
 int si;
 
-int pt = 0;
-int updt = 0;
-int lt = 0;
-int kill_upd;
+static void shuffle(uint32_t *arr)
+{
+	int i, j;
+
+	for (i = 0; i < MAX_REGIONS; i++) {
+
+		j = random() % (i + 1);
+		
+		arr[i] = arr[j];
+		arr[j] = i;
+	}
+}
+
 static void *looker(
 	void *arg)
 {
-	int err;
-	int i = 0;
-	unsigned long id  = (unsigned long)arg;
-	char key_real[32] = {};
-	char b[MAX_REGIONS/8+1];
+	unsigned long id  = (unsigned long) arg;
+	int err, i;
 
-	char kb[256];
-	char vb[256];
+	uint32_t key;
+	uint32_t kmem[64];
+	uint32_t vmem[64];
+	uint32_t p[MAX_REGIONS];
+	DBT k, v;
 
-	DBT kk, vv;
+	memset(kmem, 0, sizeof(kmem));
+	memset(vmem, 0, sizeof(vmem));
+	shuffle(p);
 
-	memset(key_real, 0, 32);
-	memset(b,0,MAX_REGIONS/8+1);
-	memset(kb, 0, 256);
-	memset(vb, 0, 256);
+	k.data = kmem;
+	k.size = 32;
 
-	while (i < MAX_REGIONS) {
-		uint32_t r = random() % MAX_REGIONS;
-		uint32_t by=r/8, bi=r%8;
-		uint32_t key = r*MAX_THREAD*3+id*3+switcher[si][0];
+	v.data = vmem;
+	v.size = 250;
 
-		if (!(b[by]&(1<<bi))) {
+	for (i = 0; i < MAX_REGIONS; i++) {
 
-			b[by]|=(1<<bi);
+		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][0];
 
-			*(uint32_t *) kb = key;
-			kk.data = kb;
-			kk.size = 32;
+		kmem[0] = key;
+		vmem[0] = key;
 
-
-			vv.data = vb;
-			vv.size = 250;
-
-			err = __bt_get(t, &kk, &vv);
-
-			if (!err) {
-				if (!pt) assert(bitmap[key/8]&(1<<(key%8)));
-			} else if (err == -ENOENT) {
-				if (!pt) assert(!(bitmap[key/8]&(1<<(key%8))));
-			} else {
-				fprintf(stderr, "error in lookup\n");
-//				exit(1);
-			}
-			i++;
+		err = __bt_get(t, &k, &v); 
+		if (!err) {
+			assert(bitmap[key >> 3] & (1 << (key % 8)));
+		} else if (err == -ENOENT) {
+			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
+		} else {
+			fprintf(stderr, "error in lookup\n");
 		}
 	}
 	
@@ -1281,105 +1299,78 @@ static void *looker(
 static void *inserter(
 	void *arg)
 {
-	int err;
-	int i = 0;
-	unsigned long id = (unsigned long)arg;
-	char b[MAX_REGIONS/8+1];
-	char key_real[32] = {};
+	unsigned long id  = (unsigned long) arg;
+	int err, i;
 
-	char kb[256];
-	char vb[256];
+	uint32_t key;
+	uint32_t kmem[64];
+	uint32_t vmem[64];
+	uint32_t p[MAX_REGIONS];
+	DBT k, v;
 
-	DBT kk, vv;
+	memset(kmem, 0, sizeof(kmem));
+	memset(vmem, 0, sizeof(vmem));
+	shuffle(p);
 
+	k.data = kmem;
+	k.size = 32;
 
-	memset(b,0,MAX_REGIONS/8+1);
-	memset(key_real, 0, 32);
-	memset(kb, 0, 256);
-	memset(vb, 0, 256);
+	v.data = vmem;
+	v.size = 250;
 
-	while (i < MAX_REGIONS) {
-		uint32_t r = random() % MAX_REGIONS;
-		uint32_t by=r/8,bi=r%8;
-		uint32_t key = r*MAX_THREAD*3+id*3+switcher[si][1];
+	for (i = 0; i < MAX_REGIONS; i++) {
 
-		if (!(b[by]&(1<<bi))) {
+		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][1];
 
-			b[by]|=(1<<bi);
+		kmem[0] = key;
+		vmem[0] = key;
 
-			*(uint32_t *) kb = key;
-			kk.data = kb;
-			kk.size = 32;
+		err = __bt_put(t, &k, &v); 
+		if (!err) {	
+			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
+			__sync_fetch_and_or(&bitmap[key >> 3], 1 << (key % 8));
 
-
-			*(uint32_t *) vb = key;
-			vv.data = vb;
-			vv.size = 250;
-
-			err = __bt_put(t, &kk, &vv);
-			if (!err) {	
-
-				if (!pt) assert(!(bitmap[key/8]&(1<<(key%8))));
-				__sync_fetch_and_or(&bitmap[key/8], 1<<(key%8));
-
-			} else if (err == -EEXIST) {
-				if (!pt) assert(bitmap[key/8]&(1<<(key%8)));
-			} else {
-				fprintf(stderr, "error in insert\n");
-			}
-			i++;
+		} else if (err == -EEXIST) {
+			assert(bitmap[key >> 3] & (1 << (key % 8)));
+		} else {
+			fprintf(stderr, "error in insert\n");
 		}
 	}
 	
 	return NULL;
 }
 
-static void *deleter0(
+static void *deleter(
 	void *arg)
 {
-	int err;
-	int i=0;
-	unsigned long  id = (unsigned long)arg;
-	char b[MAX_REGIONS/8+1];
-	char key_real[32] = {};
+	unsigned long id  = (unsigned long) arg;
+	int err, i;
 
-	char kb[256];
-	char vb[256];
+	uint32_t key;
+	uint32_t kmem[64];
+	uint32_t p[MAX_REGIONS];
+	DBT k;
 
-	DBT kk, vv;
+	memset(kmem, 0, sizeof(kmem));
+	shuffle(p);
 
+	k.data = kmem;
+	k.size = 32;
 
-	memset(kb, 0, 256);
-	memset(vb, 0, 256);
+	for (i = 0; i < MAX_REGIONS; i++) {
 
-	memset(b,0,MAX_REGIONS/8+1);
-	memset(key_real, 0, 32);
+		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][2];
 
-	while (i < MAX_REGIONS) {
-		uint32_t r = random() % MAX_REGIONS;
-		uint32_t by=r/8,bi=r%8;
-		uint32_t key = r*MAX_THREAD*3+id*3+switcher[si][2];
+		kmem[0] = key;
 
-		if (!(b[by]&(1<<bi))) {
-
-			b[by]|=(1<<bi);
-
-			*(uint32_t *) kb = key;
-			kk.data = kb;
-			kk.size = 32;
-
-			err = __bt_del(t, &kk);
-			if (!err) {
-				if (!pt) assert(bitmap[key/8]&(1<<(key%8)));
-				__sync_fetch_and_and(&bitmap[key/8], ~(1U<<(key%8)));
-			} else if (err == -ENOENT) {
-				if (!pt) assert(!(bitmap[key/8]&(1<<(key%8))));
-			}
-			else {
-				fprintf(stderr, "error in delete\n");
-			//	exit(1);
-			}
-			i++;
+		err = __bt_del(t, &k);
+		if (!err) {
+			assert(bitmap[key >> 3] & (1 << (key % 8)));
+			__sync_fetch_and_and(&bitmap[key >> 3], ~(1U << (key % 8)));
+		} else if (err == -ENOENT) {
+			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
+		} else {
+			fprintf(stderr, "error in delete\n");
 		}
 	}
 
@@ -1404,7 +1395,7 @@ void test(void)
 
 
 		for (i=0;i<MAX_THREAD;i++)
-			(void) pthread_create(&dthread[i], NULL, deleter0, (void*)i);
+			(void) pthread_create(&dthread[i], NULL, deleter, (void*)i);
 
 
 		for (i=0;i<MAX_THREAD;i++)
@@ -1421,6 +1412,7 @@ void test(void)
 	}
 }
 
+#define NORG 16
 int main()
 {
 	struct mpage *mp, *mp_md;

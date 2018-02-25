@@ -25,6 +25,7 @@ struct mpage *bt_page_get_nowait(uint64_t pgno)
 	pthread_mutex_unlock(&mutex);
 
 	assert(mp_pages[pgno].dp);
+	assert(mp_pages[pgno].state != MP_STATE_DELETED);
 	return &mp_pages[pgno];
 }
 
