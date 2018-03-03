@@ -173,9 +173,31 @@ int bt_page_init(void)
 
 		mp->flags = 0;
 		mp->dp = NULL;
-		mp->state = MP_STATE_NORMAL;
+		mp->state = MP_STATE_INIT;
 		mp->leftmost = false;
 
 		mp->pgno = i;
+		mp->mark = 0;
 	}		
+}
+
+void check_pages(void)
+{
+	int i;
+	struct mpage *mp;
+	for (i = 1; i < MP_MAXPAGES; i++) {
+		mp = &mp_pages[i];
+
+		if (mp->mark) {
+			assert(page_map[mp->pgno / 64] & (1ULL << (mp->pgno % 64)));
+			assert(MP_NORMAL(mp));
+		} else {
+			if (mp->state != MP_STATE_INIT) {
+				//eprintf("ERROR: %lu\n", mp->pgno);
+				assert(!(page_map[mp->pgno / 64] & (1ULL << (mp->pgno % 64))));
+				assert(MP_DELETED(mp));
+			}
+		}
+		assert(mp->count == 0);
+	}
 }
