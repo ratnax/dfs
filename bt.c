@@ -1342,6 +1342,7 @@ void print_tree(BTREE *t)
 }
 
 #define NORG 16
+
 int main()
 {
 	struct mpage *mp, *mp_md;

@@ -2,6 +2,7 @@
 #define __BT_INT_H__
 
 #include "global.h"
+#include "bm_ext.h"
 #include "pm_ext.h"
 
 typedef	uint16_t	indx_t;
@@ -115,10 +116,14 @@ typedef struct BTREE_s {
 #define DP_MAX_DSIZE	    256
 #define BT_MDPGNO	    (0)
 
-extern void	     bt_page_free(struct mpage *mp);
-extern struct mpage *bt_page_get_nowait(pgno_t pgno);
-extern struct mpage *bt_page_get(pgno_t pgno);
-extern struct mpage *bt_page_new(size_t size);
-extern int	     bt_page_system_init(void);
-extern void	     bt_page_system_exit(void);
+extern void		 bt_page_rdlock(struct mpage *mp);
+extern void		 bt_page_wrlock(struct mpage *mp);
+extern void		 bt_page_unlock(struct mpage *mp);
+extern void		 bt_page_free(struct mpage *mp);
+extern void		 bt_page_put(struct mpage *mp);
+extern struct mpage	*bt_page_get_nowait(pgno_t pgno);
+extern struct mpage	*bt_page_get(pgno_t pgno);
+extern struct mpage	*bt_page_new(size_t size);
+extern int		 bt_page_system_init(void);
+extern void		 bt_page_system_exit(void);
 #endif

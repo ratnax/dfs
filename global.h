@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <unistd.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <string.h>
