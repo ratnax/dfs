@@ -1109,8 +1109,7 @@ void *reorganiser(void *arg)
 	while (1) {
 		pthread_mutex_lock(&reorg_qlock);
 		while ((mp = reorg_qhead.tqh_first) == NULL && !exito)
-			pthread_cond_wait(&reorg_qcond, 
-			    &reorg_qlock);
+			pthread_cond_wait(&reorg_qcond, &reorg_qlock);
 		if (mp) {
 		   	TAILQ_REMOVE(&reorg_qhead, mp, reorg_qentry);
 			__set_state_prereorg(mp);
@@ -1126,6 +1125,11 @@ void *reorganiser(void *arg)
 	
 BTREE tt, *t = &tt;
 
+BTREE *
+bt_alloc(const char *path)
+{
+
+}
 #define MAX_ELE     (1000000)
 #define MAX_THREAD  (16)
 
@@ -1246,7 +1250,8 @@ static void *deleter(
 		err = __bt_del(t, &k);
 		if (!err) {
 			assert(bitmap[key >> 3] & (1 << (key % 8)));
-			__sync_fetch_and_and(&bitmap[key >> 3], ~(1U << (key % 8)));
+			__sync_fetch_and_and(&bitmap[key >> 3],
+			    ~(1U << (key % 8)));
 		} else if (err == -ENOENT) {
 			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
 		} else {
@@ -1363,7 +1368,7 @@ int main()
 	bt_page_system_init();
 
 	mp_md = bt_page_get(BT_MDPGNO);
-	 if (IS_ERR(mp_md)) {
+	if (IS_ERR(mp_md)) {
 		return PTR_ERR(mp_md);
 	}
 	mp_md->dp->flags = DP_METADATA;
@@ -1393,3 +1398,7 @@ int main()
 		pthread_join(reorganisers[i], NULL);
 	print_tree(t);
 }
+
+
+#ifdef BT_MKFS
+#endif
