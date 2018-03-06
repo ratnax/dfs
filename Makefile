@@ -1,4 +1,4 @@
-CFLAGS=-Wfatal-errors -ggdb2 # -O3
+CFLAGS=-Wfatal-errors -ggdb2 -O3
 LDFLAGS=-lpthread
 
 EXT=bt_ext.h pm_ext.h bm_ext.h

@@ -380,7 +380,6 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 		}
 		break;
 	case WRITING:
-		printf("%ld in GET writing\n", pgno);
 		assert(pg->size == PAGE_SIZE);
 		if (!pg->dp_mem && !(pg->dp_mem = malloc(size))) {
 			__page_put_locked(pm, pg);

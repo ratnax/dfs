@@ -67,7 +67,7 @@ bm_page_system_exit(void)
 int 
 bm_page_system_init(void)
 {
-	pm = pm_alloc(sizeof (struct mpage), __init_mpage, __exit_mpage, 100000);
+	pm = pm_alloc(sizeof (struct mpage), __init_mpage, __exit_mpage, 100);
 	if (IS_ERR(pm)) 
 		return PTR_ERR(pm);
 	return 0;
