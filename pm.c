@@ -380,6 +380,7 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 		/* fall through */
 	case READING:
 		if (nowait) {
+			__page_put_locked(pm, pg);
 			pthread_mutex_unlock(&pm->lock);
 			return ERR_PTR(-EAGAIN);
 		}
@@ -505,9 +506,25 @@ pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb)
 void
 pm_free(pg_mgr_t *pm)
 {
+	struct page *pg, *tmp;
+	int i;
+
 	pm->active = false;
 	pthread_cond_signal(&pm->cond);
 	pthread_join(pm->syncer, NULL);
+
+	list_for_each_entry_safe(pg, tmp, &pm->clean_lru_pages, q) {
+		list_del(&pg->q);
+		__delete_locked_htab(pm, pg);
+		__page_free(pm, pg);
+	}
+	assert(list_empty(&pm->dirty_lru_pages));
+	for (i = 0; i < HASHSIZE; i++) {
+		assert(hlist_empty(&pm->hash_table[i]));
+//		hlist_for_each_entry(pg, &pm->hash_table[i], hq) {
+//			eprintf("%ld %d\n", pg->pgno, pg->count);
+//		}
+	}
 	free(pm);
 }
 

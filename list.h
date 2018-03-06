@@ -76,6 +76,11 @@ static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
 	n->pprev = &h->first;
 }
 
+static inline int hlist_empty(const struct hlist_head *h)
+{
+	    return !(h->first);
+}
+
 #define container_of(ptr, type, member) ({			\
 	const __typeof__( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
