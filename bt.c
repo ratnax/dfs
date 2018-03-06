@@ -447,8 +447,8 @@ static int __bt_page_shrink(BTREE *t, struct mpage *mp)
 		new_dp->linp[i] = dp->linp[i] - shift;
 	mp->dp = new_dp;
 	mp->size = PAGE_SIZE; 
-	free(dp);
 	bt_page_mark_dirty(mp);
+	free(dp);
 	return 0;
 }
 
@@ -1289,30 +1289,47 @@ static void *deleter(
 
 void test(void)
 {
-	uint32_t k;
 	pthread_t lthread[MAX_THREAD],ithread[MAX_THREAD],dthread[MAX_THREAD];
+	uint32_t kmem[64];
+	uint32_t vmem[64];
+	uint32_t i;
+	DBT k, v;
+	int err;
 
-	for (k=0; k<10; k++)  {
-		unsigned long i;
-		fprintf(stdout, "START:%d...",k);
-		srandom(k);
-		for (i=0;i<MAX_THREAD;i++)
-			(void)pthread_create(&lthread[i], NULL, looker,
-			    (void*)i);
-		for (i=0;i<MAX_THREAD;i++)
-			(void) pthread_create(&ithread[i], NULL, inserter,
-			    (void*)i);
-		for (i=0;i<MAX_THREAD;i++)
-			(void) pthread_create(&dthread[i], NULL, deleter,
-			    (void*)i);
-		for (i=0;i<MAX_THREAD;i++)
-			(void)pthread_join(lthread[i], NULL);
-		for (i=0;i<MAX_THREAD;i++)
-			(void) pthread_join(ithread[i], NULL);
-		for (i=0;i<MAX_THREAD;i++)
-			(void) pthread_join(dthread[i], NULL);
+	memset(kmem, 0, sizeof(kmem));
+	memset(vmem, 0, sizeof(vmem));
+
+	k.data = kmem;
+	k.size = 32;
+	v.data = vmem;
+	v.size = 250;
+	for (i = 0; i < MAX_ELE; i++) {
+		kmem[0] = i;
+		err = __bt_get(t, &k, &v); 
+		if (!err) {
+			bitmap[i / 8] |= (1 << (i % 8));
+		} else {
+			assert(err == -ENOENT);
+		}
+	}
+	for (i = 0; i < 10; i++)  {
+		unsigned long j;
+		fprintf(stdout, "START:%d...", i);
+		srandom(i);
+		for (j = 0; j < MAX_THREAD; j++)
+			pthread_create(&lthread[j], NULL, looker,   (void*) j);
+		for (j = 0; j < MAX_THREAD; j++)
+			pthread_create(&ithread[j], NULL, inserter, (void*) j);
+		for (j = 0; j < MAX_THREAD; j++)
+			pthread_create(&dthread[j], NULL, deleter,  (void*) j);
+		for (j = 0; j < MAX_THREAD; j++)
+			pthread_join(lthread[j], NULL);
+		for (j = 0; j < MAX_THREAD; j++)
+			pthread_join(ithread[j], NULL);
+		for (j = 0; j < MAX_THREAD; j++)
+			pthread_join(dthread[j], NULL);
 		fprintf(stdout, "DONE.\n");
-		si = (si+1)%6;
+		si = (si + 1) % 6;
 	}
 }
 
@@ -1396,20 +1413,25 @@ int main()
 	mp_md = bt_page_get(BT_MDPGNO);
 	if (IS_ERR(mp_md)) 
 		return PTR_ERR(mp_md);
-	mp_md->dp->flags = DP_METADATA;
 
-	mp = bt_page_new(PAGE_SIZE);
-	if (IS_ERR(mp)) {
-		return PTR_ERR(mp);
+	if (!MP_ISMETADATA(mp_md) || !mp_md->dp->root_pgno) {
+
+		eprintf("NEW BTREE\n");
+		mp = bt_page_new(PAGE_SIZE);
+		if (IS_ERR(mp)) {
+			return PTR_ERR(mp);
+		}
+		dp = mp->dp;
+		dp->flags = DP_LEAF;
+		dp->lower = DP_HDRLEN;
+		dp->upper = mp->size;
+		bt_page_mark_dirty(mp);
+		bt_page_put(mp);
+
+		mp_md->dp->flags = DP_METADATA;
+		mp_md->dp->root_pgno = mp->pgno;
+		bt_page_mark_dirty(mp_md);
 	}
-	dp = mp->dp;
-	dp->flags = DP_LEAF;
-	dp->lower = DP_HDRLEN;
-	dp->upper = mp->size;
-	bt_page_mark_dirty(mp);
-	bt_page_put(mp);
-
-	mp_md->dp->root_pgno = mp->pgno;
 	bt_page_put(mp_md);
 
 	TAILQ_INIT(&reorg_qhead);
