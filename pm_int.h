@@ -17,8 +17,7 @@ typedef enum {
 	UPTODATE,
 	DIRTY,
 	WRITING,
-	COWED,
-	COWED_DIRTY,
+	DELETED
 } page_state_t;
 
 struct page {
@@ -29,7 +28,6 @@ struct page {
 	pthread_rwlock_t  lock;
 	int writers;
 	int readers;
-	bool stale;
 
 	struct hlist_node hq;		/* hash queue */
 	struct list_head q;		/* lru queue */
@@ -50,6 +48,7 @@ struct page_mgr {
 	pthread_cond_t		cond;
 	pthread_t		syncer;
 	int			nlru;
+	int			max_nlru;
 
 #define	HASHSIZE		10240
 #define	HASHKEY(pgno)		(pgno % HASHSIZE)

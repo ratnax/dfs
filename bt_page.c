@@ -79,6 +79,7 @@ __init_mpage(struct mpage *mp)
 	mp->state = MP_STATE_NORMAL;
 	pthread_mutex_init(&mp->mutex, NULL);
 	pthread_cond_init(&mp->cond, NULL);
+	return 0;
 }
 
 static void
@@ -98,7 +99,7 @@ bt_page_system_exit(void)
 int
 bt_page_system_init(void)
 {
-	pm = pm_alloc(sizeof (struct mpage), &__init_mpage, &__exit_mpage);
+	pm = pm_alloc(sizeof (struct mpage), &__init_mpage, &__exit_mpage, 5);
 	if (IS_ERR(pm))
 		return (PTR_ERR(pm));
 	return (0);

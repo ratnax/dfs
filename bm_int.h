@@ -40,6 +40,7 @@ struct mpage {
 	MPAGE_STRUCT_HDR;
 	pthread_mutex_t mutex;
 };
+
 extern void		 bm_page_mark_dirty(struct mpage *mp);
 extern void		 bm_page_rdlock(struct mpage *mp);
 extern void		 bm_page_wrlock(struct mpage *mp);

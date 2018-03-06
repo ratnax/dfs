@@ -30,7 +30,7 @@ __blk_alloc(struct mpage *mp, uint64_t unit, uint64_t *map, int shft)
 		bm_page_unlock(mp);
 		return (-EAGAIN);
 	}
-	printf("%ld setting %d in %ld:%d\n", ((unit << MAX_UNIT_SHFT) + 
+	printf("%ld setting %ld in %ld:%ld\n", ((unit << MAX_UNIT_SHFT) + 
 	    (bit << shft)),  bit, mp->pgno, unit % DP_NBUNIT);
 	set_bit(bit, bu->map);
 	bm_page_mark_dirty(mp);
@@ -84,7 +84,7 @@ bm_blk_free(blk_t blk)
 	bm_page_wrlock(mp);
 	dp = mp->dp;
 	bu = &dp->bu[unit % DP_NBUNIT];
-	printf("%ld clearing %d in %ld:%d\n",
+	printf("%ld clearing %ld in %ld:%ld\n",
 	    blk, BLK2BIT(bu, blk),mp->pgno, unit % DP_NBUNIT);
 	assert(test_bit(BLK2BIT(bu, blk), bu->map));
 	clear_bit(BLK2BIT(bu, blk), bu->map);

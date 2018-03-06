@@ -141,17 +141,13 @@ __lookup_parent_nowait(BTREE *t, struct mpage *gmp, struct mpage *pmp,
 		bt_page_unlock(gmp);
 		bt_page_put(gmp);
 	}
-
 	if (PTR_ERR(mp) != -EAGAIN) 
 		return mp;
-
 	mp = bt_page_get(pgno);
 	if (IS_ERR(mp)) 
 		return mp;
-	else {
-		bt_page_put(mp);
-		return ERR_PTR(-EAGAIN);
-	}
+	bt_page_put(mp);
+	return ERR_PTR(-EAGAIN);
 }
 
 static int
@@ -426,6 +422,7 @@ __bt_page_extend(BTREE *t, struct mpage *mp)
 	mp->dp = dp;
 	mp->size = mp->size + PAGE_SIZE;
 	free(old_dp);
+	//eprintf("%ld extend %p %p %d %d %ld\n", mp->pgno, mp, dp, dp->lower, dp->upper, mp->size);
 	return 0;
 }
 
@@ -451,6 +448,7 @@ __bt_page_shrink(BTREE *t, struct mpage *mp)
 		new_dp->linp[i] = dp->linp[i] - shift;
 	mp->dp = new_dp;
 	mp->size = PAGE_SIZE; 
+	//eprintf("%ld shrink %d %d %ld\n", mp->pgno, new_dp->lower, new_dp->upper, mp->size);
 	bt_page_mark_dirty(mp);
 	free(dp);
 	return 0;
@@ -704,11 +702,18 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 	rmp = bt_page_new(size);
 	assert(rmp);
 
+	bt_page_wrlock(lmp);
+	lmp->state = MP_STATE_NORMAL;
+	if (lmp->size != size) {
+		free(lmp->dp);
+		lmp->dp = malloc(size);
+		assert(lmp->dp);
+		lmp->size = size;
+	}
 	ldp = lmp->dp;
-	rdp = rmp->dp;
-	ldp->flags = rdp->flags = dp->flags & DP_TYPE;
-	rdp->lower = ldp->lower = DP_HDRLEN;
-	rdp->upper = ldp->upper = size;
+	ldp->flags = dp->flags & DP_TYPE;
+	ldp->lower = DP_HDRLEN;
+	ldp->upper = size;
 
 	used = 0;
 	for (nxt = off = 0, top = DP_NXTINDX(dp); nxt < top; ++off) {
@@ -744,6 +749,22 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 	 * Nxt is the first offset to be placed on the right page.
 	 */
 	ldp->lower += (off + 1) * sizeof(indx_t);
+	bt_page_mark_dirty(lmp);
+	bt_page_unlock(lmp);
+
+	bt_page_wrlock(rmp);
+	rmp->state = MP_STATE_NORMAL;
+	if (rmp->size != size) {
+		free(rmp->dp);
+		rmp->dp = malloc(size);
+		assert(rmp->dp);
+		rmp->size = size;
+	}
+
+	rdp = rmp->dp;
+	rdp->flags = dp->flags & DP_TYPE;
+	rdp->lower = DP_HDRLEN;
+	rdp->upper = size;
 
 	for (off = 0; nxt < top; ++off) {
 		switch (dp->flags & DP_TYPE) {
@@ -764,6 +785,8 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 	}
 	rdp->lower += off * sizeof(indx_t);
 
+	bt_page_mark_dirty(rmp);
+	bt_page_unlock(rmp);
 	assert(ldp->lower <= ldp->upper);
 	assert(rdp->lower <= rdp->upper);
 	*out_left = lmp;
@@ -781,13 +804,19 @@ __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, struct mpage *lmp,
 	DLEAF *dl;
 	DINTERNAL *di;
 
-	pdp = pmp->dp;
 	rdp = rmp->dp;
 	ldp = lmp->dp;
 
-	ldp->flags =  
-	rdp->flags = mp->dp->flags & DP_TYPE;
-
+	bt_page_wrlock(pmp);
+	pmp->state = MP_STATE_NORMAL;
+	if (pmp->size != PAGE_SIZE) {
+		free(pmp->dp);
+		pmp->dp = malloc(PAGE_SIZE);
+		assert(pmp->dp);
+		pmp->size = PAGE_SIZE;
+	}
+	pdp = pmp->dp;
+    
 	assert(DP_NXTINDX(ldp));
 	assert(DP_NXTINDX(rdp));
 	
@@ -823,8 +852,7 @@ __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, struct mpage *lmp,
 	pdp->flags |= DP_INTERNAL;
 
 	bt_page_mark_dirty(pmp);
-	bt_page_mark_dirty(lmp);
-	bt_page_mark_dirty(rmp);
+	bt_page_unlock(pmp);
 }
 
 static bool 
@@ -887,9 +915,8 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 	di = GETDINTERNAL(pdp, indx);
 	di->pgno = lmp->pgno;
 
+	bt_page_mark_dirty(pmp);
 	//eprintf("<%ld %ld %ld>\n", pmp->pgno, lmp->pgno, rmp->pgno);
-	bt_page_mark_dirty(lmp);
-	bt_page_mark_dirty(rmp);
 	return pdp != old_pdp;
 }
 
@@ -922,9 +949,11 @@ __bt_split(BTREE *t, struct mpage *mp)
 			assert(0);
 			return PTR_ERR(new_root);
 		}
-		bt_page_wrlock(pmp);
+
 		__bt_root(t, mp, new_root, lmp, rmp);
+		bt_page_wrlock(pmp);
 		pmp->dp->root_pgno = new_root->pgno;
+		bt_page_mark_dirty(pmp);
 	} else {
 		while (MP_ISFULL(pmp)) {
 			__set_state_reorging(pmp);
@@ -942,7 +971,6 @@ __bt_split(BTREE *t, struct mpage *mp)
 	lmp_need_split = MP_NEED_SPLIT(lmp);
 	rmp_need_split = MP_NEED_SPLIT(rmp);
 	
-	bt_page_mark_dirty(pmp);
 	bt_page_unlock(pmp);
 	__set_state_deleted(mp);
 	if (new_root)
@@ -1182,7 +1210,7 @@ bt_alloc(const char *path)
 {
 
 }
-#define MAX_ELE     (1000)
+#define MAX_ELE     (1000000)
 #define MAX_THREAD  (16)
 
 #define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
@@ -1266,11 +1294,11 @@ static void *inserter(
 		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][1];
 		kmem[0] = key;
 		vmem[0] = key;
-		v.size = key % 249 + 1;
+		v.size = 250; //key % 249 + 1;
 		err = __bt_put(t, &k, &v); 
 		if (!err) {	
 			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
-			assert(v.size == key % 249 + 1);
+			// assert(v.size == key % 249 + 1);
 			__sync_fetch_and_or(&bitmap[key >> 3], 1 << (key % 8));
 		} else if (err == -EEXIST) {
 			assert(bitmap[key >> 3] & (1 << (key % 8)));
@@ -1338,7 +1366,7 @@ void test(void)
 			assert(err == -ENOENT);
 		}
 	}
-	for (i = 0; i < 10; i++)  {
+	for (i = 0; i < 10000000; i++)  {
 		unsigned long j;
 		fprintf(stdout, "START:%d...", i);
 		srandom(i);

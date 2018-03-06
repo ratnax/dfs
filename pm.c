@@ -97,7 +97,6 @@ static int
 __page_init(pg_mgr_t *pm, struct page *pg, uint64_t pgno, uint32_t size)
 {
 	pg->state = NEW;
-	pg->stale = false;
 	pg->pgno = pgno;
 	pg->count = 0;
 	pg->size = size;
@@ -106,8 +105,7 @@ __page_init(pg_mgr_t *pm, struct page *pg, uint64_t pgno, uint32_t size)
 	pg->readers = pg->writers = 0;
 	pg->dp_mem = NULL;
 	INIT_HLIST_NODE(&pg->hq);
-	pg->dp = malloc(size);
-	if (!pg->dp) 
+	if (!(pg->dp = calloc(1,  size)))
 		return (-ENOMEM);
 	return pm->init_mpage(PG2MPG(pg));
 }
@@ -117,18 +115,16 @@ __page_put_locked(pg_mgr_t *pm, struct page *pg)
 {
 	assert(pg->count > 0);
 	if (--pg->count == 0) {
-		if (pg->stale) {
-			pthread_mutex_unlock(&pm->lock);
-			__page_free(pm, pg);
-			pthread_mutex_lock(&pm->lock);
-			return;
-		}
-		assert(pg->size == PAGE_SIZE);
 		switch (pg->state) {
 		case NEW:
+		case DELETED:
+			__delete_locked_htab(pm, pg);
+			__page_free(pm, pg);
+			break;
 		case UPTODATE:
+			assert(pg->size == PAGE_SIZE);
 			list_add_tail(&pg->q, &pm->clean_lru_pages);
-			if (pm->nlru++ == 100) {
+			if (pm->nlru++ == pm->max_nlru) {
 				pg = list_first_entry(&pm->clean_lru_pages,
 				    struct page, q);
 
@@ -141,12 +137,11 @@ __page_put_locked(pg_mgr_t *pm, struct page *pg)
 			}
 			break;
 		case DIRTY:
+			assert(pg->size == PAGE_SIZE);
 			list_add_tail(&pg->q, &pm->dirty_lru_pages);
 			pthread_cond_signal(&pm->cond);
 			break;
 		case WRITING:
-		case COWED:
-		case COWED_DIRTY:
 		case READING:
 		default:
 			assert(0);
@@ -172,16 +167,13 @@ pm_page_mark_dirty(pg_mgr_t *pm, struct mpage *mp)
 	switch (pg->state) {
 	case NEW:
 	case UPTODATE:
+	case DELETED:
+	case WRITING:
 		pg->state = DIRTY;
 		break;
-	case COWED:
-		pg->state = COWED_DIRTY;	
-		break;
 	case DIRTY:
-	case COWED_DIRTY:
 		break;
 	case READING:
-	case WRITING:
 	default:
 		assert(0);
 	}
@@ -194,8 +186,18 @@ pm_page_delete(pg_mgr_t *pm, struct mpage *mp)
 	struct page *pg = MPG2PG(mp);
 
 	pthread_mutex_lock(&pm->lock);
-	__delete_locked_htab(pm, pg);
-	pg->stale = true;
+	switch (pg->state) {
+	case NEW:
+	case UPTODATE:
+	case DIRTY:
+	case WRITING:
+		pg->state = DELETED;
+	case DELETED:
+		break;
+	case READING:
+	default:
+		assert(0);
+	}
 	pthread_mutex_unlock(&pm->lock);
 }
 
@@ -249,7 +251,6 @@ __page_cow(pg_mgr_t *pm, struct page *pg)
 		memcpy(dp, pg->dp, pg->size);
 		pg->dp = dp;
 		pg->dp_mem = NULL;
-		pg->state = COWED;
 		printf("%ld COWED\n", pg->pgno);
 	}
 	pthread_mutex_unlock(&pm->lock);
@@ -294,7 +295,6 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	ssize_t b;
 	int err;
 
-	assert(!pg->stale);
 	switch (pg->state) {
 	case DIRTY:
 		pg->state = WRITING;
@@ -304,8 +304,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	case UPTODATE:
 	case READING:
 	case WRITING:
-	case COWED:
-	case COWED_DIRTY:
+	case DELETED:
 	default:
 		assert(0);
 		break;
@@ -317,30 +316,14 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	err = (b == PAGE_SIZE) ? 0 : -EIO;
     
 	pthread_mutex_lock(&pm->lock);
-	switch (pg->state) {
-	case NEW:
-	case DIRTY:
-	case UPTODATE:
-	case READING:
-		assert (0);
-		break;
-	case COWED:
-		free(dp);
-		/* fall through */
-	case WRITING:
+	if (pg->state == WRITING) {
 		if (!err) 
 			pg->state = UPTODATE;
 		else 
 			pg->state = DIRTY;
-		break;
-	case COWED_DIRTY:
-		free(dp);
-		pg->state = DIRTY;
-		break;
-	default:
-		assert(0);
-		break;
 	}
+	if (pg->dp != dp)
+		free(dp);
 	return err;
 }
 
@@ -350,7 +333,7 @@ __page_new(pg_mgr_t *pm, pgno_t pgno, size_t size)
 	int err;
 	struct page *pg;
 
-	if (!(pg = malloc(SIZEOF_PAGE(pm))))
+	if (!(pg = calloc(1, SIZEOF_PAGE(pm))))
 		return NULL;
 	if ((err = __page_init(pm, pg, pgno, size))) {
 		__page_free(pm, pg);
@@ -375,10 +358,13 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 	pthread_mutex_lock(&pm->lock);
 	switch (pg->state) {
 	case NEW:
-		if (noread)
+		if (noread) {
+			pg->state = DELETED;
 			break;
+		}
 		/* fall through */
 	case READING:
+		assert(pg->size == PAGE_SIZE);
 		if (nowait) {
 			__page_put_locked(pm, pg);
 			pthread_mutex_unlock(&pm->lock);
@@ -395,15 +381,16 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 		break;
 	case WRITING:
 		printf("%ld in GET writing\n", pgno);
+		assert(pg->size == PAGE_SIZE);
 		if (!pg->dp_mem && !(pg->dp_mem = malloc(size))) {
 			__page_put_locked(pm, pg);
+			pthread_mutex_unlock(&pm->lock);
 			return ERR_PTR(-ENOMEM);
 		}
 		break;
+	case DELETED:
 	case UPTODATE:
 	case DIRTY:
-	case COWED:
-	case COWED_DIRTY:
 		break;
 	default:
 		assert(0);
@@ -466,6 +453,8 @@ static void * syncer(void *arg)
 
 		assert(pg->count == 0);
 		assert(pg->size == PAGE_SIZE);
+		assert(pg->state == DIRTY);
+	    
 		list_del(&pg->q);
 		pg->count++;
 
@@ -477,7 +466,7 @@ static void * syncer(void *arg)
 }
 
 pg_mgr_t *
-pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb)
+pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb, int max_nlru)
 {
 	pg_mgr_t *pm;
 	int i, err;
@@ -493,6 +482,7 @@ pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb)
 	pthread_cond_init(&pm->cond, NULL);
 	pm->init_mpage = init_cb;
 	pm->exit_mpage = exit_cb;
+	pm->max_nlru = max_nlru;
 	pm->mp_sz = mp_sz;
 	pm->active = true;
 
