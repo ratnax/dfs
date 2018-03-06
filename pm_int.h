@@ -17,6 +17,7 @@ typedef enum {
 	UPTODATE,
 	DIRTY,
 	WRITING,
+	COWED,
 	DELETED
 } page_state_t;
 

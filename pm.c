@@ -143,6 +143,7 @@ __page_put_locked(pg_mgr_t *pm, struct page *pg)
 			break;
 		case WRITING:
 		case READING:
+		case COWED:
 		default:
 			assert(0);
 		}
@@ -168,11 +169,12 @@ pm_page_mark_dirty(pg_mgr_t *pm, struct mpage *mp)
 	case NEW:
 	case UPTODATE:
 	case DELETED:
-	case WRITING:
+	case COWED:
 		pg->state = DIRTY;
 		break;
 	case DIRTY:
 		break;
+	case WRITING:
 	case READING:
 	default:
 		assert(0);
@@ -190,11 +192,12 @@ pm_page_delete(pg_mgr_t *pm, struct mpage *mp)
 	case NEW:
 	case UPTODATE:
 	case DIRTY:
-	case WRITING:
+	case COWED:
 		pg->state = DELETED;
 	case DELETED:
 		break;
 	case READING:
+	case WRITING:
 	default:
 		assert(0);
 	}
@@ -251,6 +254,7 @@ __page_cow(pg_mgr_t *pm, struct page *pg)
 		memcpy(dp, pg->dp, pg->size);
 		pg->dp = dp;
 		pg->dp_mem = NULL;
+		pg->state = COWED;
 		printf("%ld COWED\n", pg->pgno);
 	}
 	pthread_mutex_unlock(&pm->lock);
@@ -305,6 +309,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	case READING:
 	case WRITING:
 	case DELETED:
+	case COWED:
 	default:
 		assert(0);
 		break;
@@ -316,7 +321,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	err = (b == PAGE_SIZE) ? 0 : -EIO;
     
 	pthread_mutex_lock(&pm->lock);
-	if (pg->state == WRITING) {
+	if (pg->state == WRITING || pg->state == COWED) {
 		if (!err) 
 			pg->state = UPTODATE;
 		else 
@@ -387,6 +392,7 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 			return ERR_PTR(-ENOMEM);
 		}
 		break;
+	case COWED:
 	case DELETED:
 	case UPTODATE:
 	case DIRTY:
