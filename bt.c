@@ -292,12 +292,14 @@ __bt_get_leaf_locked(BTREE *t, const DBT *key, bool excl)
 	return mp;
 }
 
-static struct mpage *__bt_get_leaf_excl(BTREE *t, const DBT *key)
+static struct mpage *
+__bt_get_leaf_excl(BTREE *t, const DBT *key)
 {
 	return __bt_get_leaf_locked(t, key, true);
 }
 
-static struct mpage *__bt_get_leaf_shared(BTREE *t, const DBT *key)
+static struct mpage *
+__bt_get_leaf_shared(BTREE *t, const DBT *key)
 {
 	return __bt_get_leaf_locked(t, key, false);
 }
@@ -404,7 +406,8 @@ __bt_get_parent_shared(BTREE *t, struct mpage *cmp, indx_t *indxp)
 	return __bt_get_parent_locked(t, cmp, indxp, false);
 }
 
-static int __bt_page_extend(BTREE *t, struct mpage *mp)
+static int
+__bt_page_extend(BTREE *t, struct mpage *mp)
 {
 	struct dpage *dp, *old_dp = mp->dp;
 	size_t size = mp->size;
@@ -426,7 +429,8 @@ static int __bt_page_extend(BTREE *t, struct mpage *mp)
 	return 0;
 }
 
-static int __bt_page_shrink(BTREE *t, struct mpage *mp)
+static int
+__bt_page_shrink(BTREE *t, struct mpage *mp)
 {
 	struct dpage *dp = mp->dp;
 	struct dpage *new_dp;
@@ -551,7 +555,8 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 	return MP_ISEMPTY(mp);
 }
 
-static int __bt_get(BTREE *t, const DBT *key, const DBT *val)
+static int
+__bt_get(BTREE *t, const DBT *key, const DBT *val)
 {
 	int err;
 	struct mpage *mp;
@@ -565,14 +570,16 @@ static int __bt_get(BTREE *t, const DBT *key, const DBT *val)
 	return err;
 }
 
-static void __signal_state_change(struct mpage *mp)
+static void
+__signal_state_change(struct mpage *mp)
 {
 	pthread_mutex_lock(&mp->mutex);
 	pthread_cond_broadcast(&mp->cond);
 	pthread_mutex_unlock(&mp->mutex);
 }
 
-static void __set_state_deleted(struct mpage *mp)
+static void
+__set_state_deleted(struct mpage *mp)
 {
 	pthread_mutex_lock(&mp->mutex);
 	printf("%d MP_STATE_DELETED\n", mp->pgno);
@@ -583,35 +590,40 @@ static void __set_state_deleted(struct mpage *mp)
 	bt_page_free(mp);
 }
 
-static void __set_state_normal(struct mpage *mp)
+static void
+__set_state_normal(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_NORMAL\n", mp->pgno);
 	mp->state = MP_STATE_NORMAL;
 }
 
-static void __set_state_inreorgq(struct mpage *mp)
+static void
+__set_state_inreorgq(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_INREORGQ\n", mp->pgno);
 	mp->state = MP_STATE_INREORGQ;
 }
 
-void __set_state_prereorg(struct mpage *mp)
+static void
+__set_state_prereorg(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_PREREORG\n", mp->pgno);
 	mp->state = MP_STATE_PREREORG;
 }
 
-static void __set_state_reorging(struct mpage *mp)
+static void
+__set_state_reorging(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_REORGING\n", mp->pgno);
 	mp->state = MP_STATE_REORGING;
 }
 
-static void __set_state_deleting(struct mpage *mp)
+static void
+__set_state_deleting(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
 	assert(mp->state != MP_STATE_INREORGQ);
@@ -620,14 +632,16 @@ static void __set_state_deleting(struct mpage *mp)
 	__set_state_reorging(mp);
 }
 
-static void __set_state_splitting(struct mpage *mp)
+static void
+__set_state_splitting(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
 	printf("%d splitting\n", mp->pgno);
 	__set_state_reorging(mp);
 }
 
-static bool __insert_reorg_queue(struct mpage *mp) 
+static bool
+__insert_reorg_queue(struct mpage *mp) 
 {
 	bool inserted = false;
 	assert(mp->pgno);
@@ -642,12 +656,14 @@ static bool __insert_reorg_queue(struct mpage *mp)
 	return inserted;
 }
 
-static bool __insert_split_queue(struct mpage *mp)
+static bool
+__insert_split_queue(struct mpage *mp)
 {
 	return __insert_reorg_queue(mp);
 }
 
-static bool __insert_delete_queue(struct mpage *mp)
+static bool
+__insert_delete_queue(struct mpage *mp)
 {
 	return __insert_reorg_queue(mp);
 }
@@ -755,8 +771,9 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 	return 0;
 }
 
-static void __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, 
-	struct mpage *lmp, struct mpage *rmp)
+static void
+__bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, struct mpage *lmp,
+    struct mpage *rmp)
 {
 	struct dpage *ldp, *rdp, *pdp;
 	uint32_t nbytes;
@@ -876,7 +893,10 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 	return pdp != old_pdp;
 }
 
-static int __bt_split(BTREE *t, struct mpage *mp)
+static int __bt_split_inline(BTREE *t, struct mpage *mp);
+
+static int
+__bt_split(BTREE *t, struct mpage *mp)
 {
 	struct mpage *lmp, *rmp, *pmp, *new_root;
 	indx_t indx;
@@ -936,7 +956,8 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 	return 0;
 }
 
-struct mpage * __bt_delete(BTREE *t, struct mpage *mp)
+static struct mpage *
+__bt_delete(BTREE *t, struct mpage *mp)
 {
 	struct mpage *pmp;
 	struct dpage *dp;
@@ -978,7 +999,8 @@ struct mpage * __bt_delete(BTREE *t, struct mpage *mp)
 	}
 }
 
-int __bt_delete_leaf(BTREE *t, struct mpage *mp)
+static int
+__bt_delete_leaf(BTREE *t, struct mpage *mp)
 {
 	struct mpage *pmp;
 
@@ -993,14 +1015,16 @@ int __bt_delete_leaf(BTREE *t, struct mpage *mp)
 	return PTR_ERR(mp);
 }
 
-int __bt_reorg_delete(BTREE *t, struct mpage *mp)
+static int
+__bt_reorg_delete(BTREE *t, struct mpage *mp)
 {
 	__set_state_deleting(mp);
 	bt_page_unlock(mp);
 	return __bt_delete_leaf(t, mp);
 }
 
-int __bt_reorg_split(BTREE *t, struct mpage *mp)
+static int
+__bt_reorg_split(BTREE *t, struct mpage *mp)
 {
 	int err;
 
@@ -1022,7 +1046,8 @@ int __bt_reorg_split(BTREE *t, struct mpage *mp)
 	}
 }
 
-int __bt_reorg(BTREE *t, struct mpage *mp)
+static int
+__bt_reorg(BTREE *t, struct mpage *mp)
 {
 	struct mpage *lmp, *rmp, *pmp, *new_root;
 	indx_t indx;
@@ -1043,7 +1068,8 @@ int __bt_reorg(BTREE *t, struct mpage *mp)
 	}
 }
 
-int __bt_split_inline(BTREE *t, struct mpage *mp)
+static int
+__bt_split_inline(BTREE *t, struct mpage *mp)
 {
 	int err;
 	pthread_mutex_lock(&reorg_qlock);
@@ -1124,9 +1150,9 @@ __bt_del(BTREE *t, const DBT *key)
 	return err;
 }
 	
-int exito;
+static int exito;
 
-void *reorganiser(void *arg)
+static void *reorganiser(void *arg)
 {
 	int err;
 	BTREE *t = (BTREE *) arg;
