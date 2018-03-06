@@ -10,7 +10,7 @@ PM_EXT=pm_ext.h
 BM_EXT=bm_ext.h
 BT_EXt=bt_ext.h
 
-GLOBAL=global.h
+GLOBAL=global.h find_bit.c
 
 TARGETS=bm_mkfs bm_test bt_test
 all: $(TARGETS)

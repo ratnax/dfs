@@ -108,17 +108,17 @@ static inline void hlist_add_head(struct hlist_node *n, struct hlist_head *h)
 static inline void
 INIT_LIST_HEAD(struct list_head *list)
 {
-    list->next = list->prev = list;
+	list->next = list->prev = list;
 }
 
 static inline void
-__list_add(struct list_head *entry,
-                struct list_head *prev, struct list_head *next)
+__list_add(struct list_head *entry, struct list_head *prev,
+    struct list_head *next)
 {
-    next->prev = entry;
-    entry->next = next;
-    entry->prev = prev;
-    prev->next = entry;
+	next->prev = entry;
+	entry->next = next;
+	entry->prev = prev;
+	prev->next = entry;
 }
 
 /**
@@ -139,7 +139,7 @@ __list_add(struct list_head *entry,
 static inline void
 list_add(struct list_head *entry, struct list_head *head)
 {
-    __list_add(entry, head, head->next);
+	__list_add(entry, head, head->next);
 }
 
 /**
@@ -160,15 +160,14 @@ list_add(struct list_head *entry, struct list_head *head)
 static inline void
 list_add_tail(struct list_head *entry, struct list_head *head)
 {
-    __list_add(entry, head->prev, head);
+	__list_add(entry, head->prev, head);
 }
-
 
 static inline void
 __list_del(struct list_head *prev, struct list_head *next)
 {
-    next->prev = prev;
-    prev->next = next;
+	next->prev = prev;
+	prev->next = next;
 }
 
 /**
@@ -188,7 +187,13 @@ __list_del(struct list_head *prev, struct list_head *next)
 static inline void
 list_del(struct list_head *entry)
 {
-    __list_del(entry->prev, entry->next);
+	__list_del(entry->prev, entry->next);
+}
+
+static inline int
+list_empty(const struct list_head *head)
+{
+	return head->next == head;
 }
 
 #define list_entry(ptr, type, member) \

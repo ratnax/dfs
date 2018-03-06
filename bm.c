@@ -12,7 +12,7 @@ __blk_alloc(struct mpage *mp, uint64_t unit, uint64_t *map, int shft)
 	struct dpage *dp;
 	struct bunit *bu;
 
-	pthread_mutex_lock(&mp->mutex);
+	bm_page_wrlock(mp);
 	dp = mp->dp;
 	bu = &dp->bu[unit % DP_NBUNIT];
 	if (bu->shft == MAX_UNIT_SHFT && bu->nfree) {
@@ -27,11 +27,14 @@ __blk_alloc(struct mpage *mp, uint64_t unit, uint64_t *map, int shft)
 		if (--bu->nfree == 0)
 			clear_bit(unit, map);
 	} else {
-		pthread_mutex_unlock(&mp->mutex);
+		bm_page_unlock(mp);
 		return (-EAGAIN);
 	}
+	printf("%ld setting %d in %ld:%d\n", ((unit << MAX_UNIT_SHFT) + 
+	    (bit << shft)),  bit, mp->pgno, unit % DP_NBUNIT);
 	set_bit(bit, bu->map);
-	pthread_mutex_unlock(&mp->mutex);
+	bm_page_mark_dirty(mp);
+	bm_page_unlock(mp);
 	return ((unit << MAX_UNIT_SHFT) + (bit << shft));
 }
 
@@ -78,9 +81,12 @@ bm_blk_free(blk_t blk)
 	mp = bm_page_get(pgno);
 	if (IS_ERR(mp))
 		return (PTR_ERR(mp));
-	pthread_mutex_lock(&mp->mutex);
+	bm_page_wrlock(mp);
 	dp = mp->dp;
 	bu = &dp->bu[unit % DP_NBUNIT];
+	printf("%ld clearing %d in %ld:%d\n",
+	    blk, BLK2BIT(bu, blk),mp->pgno, unit % DP_NBUNIT);
+	assert(test_bit(BLK2BIT(bu, blk), bu->map));
 	clear_bit(BLK2BIT(bu, blk), bu->map);
 	bu->nfree++;
 	if (bu->nfree == bu->nmax) {
@@ -91,7 +97,8 @@ bm_blk_free(blk_t blk)
 	} else if (bu->nfree == 1) {
 		set_bit(unit, maps[bu->shft - MIN_UNIT_SHFT]);
 	}
-	pthread_mutex_unlock(&mp->mutex);
+	bm_page_mark_dirty(mp);
+	bm_page_unlock(mp);
 	bm_page_put(mp);
 	return (0);
 }
@@ -135,6 +142,11 @@ bm_blk_alloced(blk_t blk)
 	ret = test_bit(BLK2BIT(bu, blk), bu->map);
 	bm_page_put(mp);
 	return (ret);
+}
+
+void bm_system_exit()
+{
+	bm_page_system_exit();
 }
 
 int

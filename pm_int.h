@@ -49,9 +49,10 @@ struct page_mgr {
 	pthread_mutex_t		lock;
 	pthread_cond_t		cond;
 	pthread_t		syncer;
+	int			nlru;
 
-#define	HASHSIZE		128
-#define	HASHKEY(pgno)		((pgno - 1) % HASHSIZE)
+#define	HASHSIZE		10240
+#define	HASHKEY(pgno)		(pgno % HASHSIZE)
 	struct hlist_head	hash_table[HASHSIZE];
 
 	init_mpage_t init_mpage;

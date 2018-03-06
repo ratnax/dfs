@@ -3,6 +3,12 @@
 
 static pg_mgr_t *pm;
 
+void
+bt_page_mark_dirty(struct mpage *mp)
+{
+	pm_page_mark_dirty(pm, mp);
+}
+
 struct mpage *
 bt_page_get_nowait(pgno_t pgno)
 {
@@ -30,6 +36,7 @@ bt_page_free(struct mpage *mp)
 
 	err = bm_blk_free(mp->pgno);
 	assert(!err);
+	printf("%ld Release\n", mp->pgno);
 	return;
 }
 
@@ -80,6 +87,14 @@ __exit_mpage(struct mpage *mp)
 	return;	
 }
 
+void
+bt_page_system_exit(void)
+{
+	if (pm)
+		pm_free(pm);
+	pm = NULL;
+}
+
 int
 bt_page_system_init(void)
 {
@@ -87,11 +102,4 @@ bt_page_system_init(void)
 	if (IS_ERR(pm))
 		return (PTR_ERR(pm));
 	return (0);
-}
-
-void
-bt_page_system_exit(void)
-{
-	if (pm) pm_free(pm);
-	pm = NULL;
 }

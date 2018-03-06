@@ -184,10 +184,11 @@ __bt_get_root(struct mpage *md)
 		if (!IS_ERR(mp))
 			break;
 		bt_page_unlock(md);
-		if (PTR_ERR(mp) != -EAGAIN) 
+		if (PTR_ERR(mp) != -EAGAIN) {
 			return mp;
+		}
 		mp = bt_page_get(dp->root_pgno);
-		if (IS_ERR(mp))
+		if (IS_ERR(mp)) 
 			return mp;
 		bt_page_rdlock(md);
 		dp = md->dp;
@@ -447,6 +448,7 @@ static int __bt_page_shrink(BTREE *t, struct mpage *mp)
 	mp->dp = new_dp;
 	mp->size = PAGE_SIZE; 
 	free(dp);
+	bt_page_mark_dirty(mp);
 	return 0;
 }
 
@@ -473,6 +475,7 @@ __insert_leaf_at(BTREE *t, struct mpage *mp, const DBT *key, const DBT *val,
 	dp->lower += sizeof(indx_t);
 	dp->linp[indx] = dp->upper -= nbytes;
 	__wr_dleaf((void *) dp + dp->upper, key, val);
+	bt_page_mark_dirty(mp);
 	return (dp != old_dp);
 }
 
@@ -502,7 +505,7 @@ __remove_leaf_at(struct mpage *mp, const DBT *key, indx_t indx)
 	for (cnt = DP_NXTINDX(dp) - indx; --cnt; ++ip)
 		ip[0] = ip[1] < offset ? ip[1] + nbytes : ip[1];
 	dp->lower -= sizeof(indx_t);
-
+	bt_page_mark_dirty(mp);
 	return MP_ISEMPTY(mp);
 }
 
@@ -544,10 +547,9 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 	for (cnt = DP_NXTINDX(dp) - indx; --cnt; ++ip)
 		ip[0] = ip[1] < offset ? ip[1] + nbytes : ip[1];
 	dp->lower -= sizeof(indx_t);
-
+	bt_page_mark_dirty(mp);
 	return MP_ISEMPTY(mp);
 }
-
 
 static int __bt_get(BTREE *t, const DBT *key, const DBT *val)
 {
@@ -583,36 +585,44 @@ static void __set_state_deleted(struct mpage *mp)
 
 static void __set_state_normal(struct mpage *mp)
 {
+	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_NORMAL\n", mp->pgno);
 	mp->state = MP_STATE_NORMAL;
 }
 
 static void __set_state_inreorgq(struct mpage *mp)
 {
+	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_INREORGQ\n", mp->pgno);
 	mp->state = MP_STATE_INREORGQ;
 }
 
 void __set_state_prereorg(struct mpage *mp)
 {
+	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_PREREORG\n", mp->pgno);
 	mp->state = MP_STATE_PREREORG;
 }
 
 static void __set_state_reorging(struct mpage *mp)
 {
+	assert(mp->state != MP_STATE_DELETED);
 	printf("%d MP_STATE_REORGING\n", mp->pgno);
 	mp->state = MP_STATE_REORGING;
 }
 
 static void __set_state_deleting(struct mpage *mp)
 {
+	assert(mp->state != MP_STATE_DELETED);
+	assert(mp->state != MP_STATE_INREORGQ);
+
 	printf("%d deleting\n", mp->pgno);
 	__set_state_reorging(mp);
 }
 
 static void __set_state_splitting(struct mpage *mp)
 {
+	assert(mp->state != MP_STATE_DELETED);
 	printf("%d splitting\n", mp->pgno);
 	__set_state_reorging(mp);
 }
@@ -652,7 +662,7 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 	indx_t full, half, nxt, off, skip, top, used;
 	uint32_t nbytes, len, size;
 
-	struct mpage *l_mp, *r_mp;
+	struct mpage *lmp, *rmp;
 	struct dpage *dp = mp->dp;
 	struct dpage *ldp;
 	struct dpage *rdp;
@@ -673,13 +683,13 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 	half = len / 2 + DP_HDRLEN;
 	size = (half + PAGE_MASK) & ~PAGE_MASK;
 
-	l_mp = bt_page_new(size);
-	assert(l_mp);
-	r_mp = bt_page_new(size);
-	assert(r_mp);
+	lmp = bt_page_new(size);
+	assert(lmp);
+	rmp = bt_page_new(size);
+	assert(rmp);
 
-	ldp = l_mp->dp;
-	rdp = r_mp->dp;
+	ldp = lmp->dp;
+	rdp = rmp->dp;
 	ldp->flags = rdp->flags = dp->flags & DP_TYPE;
 	rdp->lower = ldp->lower = DP_HDRLEN;
 	rdp->upper = ldp->upper = size;
@@ -740,8 +750,8 @@ __bt_psplit(BTREE *t, struct mpage *mp, struct mpage **out_left,
 
 	assert(ldp->lower <= ldp->upper);
 	assert(rdp->lower <= rdp->upper);
-	*out_left = l_mp;
-	*out_right = r_mp;
+	*out_left = lmp;
+	*out_right = rmp;
 	return 0;
 }
 
@@ -794,11 +804,15 @@ static void __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp,
 	/* Unpin the root page, set to btree internal page. */
 	pdp->flags = 0;
 	pdp->flags |= DP_INTERNAL;
+
+	bt_page_mark_dirty(pmp);
+	bt_page_mark_dirty(lmp);
+	bt_page_mark_dirty(rmp);
 }
 
 static bool 
 __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
-	struct mpage *l_mp, struct mpage *r_mp)
+	struct mpage *lmp, struct mpage *rmp)
 {
 	struct dpage *rdp, *ldp, *pdp, *old_pdp;
 	void *dest;
@@ -809,8 +823,8 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 	indx_t nxtindx;
 	int i;
 
-	rdp = r_mp->dp;
-	ldp = l_mp->dp;
+	rdp = rmp->dp;
+	ldp = lmp->dp;
 	old_pdp = pdp = pmp->dp;
 
 	switch (rdp->flags & DP_TYPE) {
@@ -843,18 +857,22 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 	case DP_INTERNAL:
 		pdp->linp[indx + 1] = pdp->upper -= nbytes;
 		dest = (char *) pdp + pdp->linp[indx + 1];
-		__wr_dinternal(dest, di->bytes, di->ksize, r_mp->pgno);
+		__wr_dinternal(dest, di->bytes, di->ksize, rmp->pgno);
 		break;
 	case DP_LEAF:
 		pdp->linp[indx + 1] = pdp->upper -= nbytes;
 		dest = (char *) pdp + pdp->linp[indx + 1];
-		__wr_dinternal(dest, dl->bytes, dl->ksize, r_mp->pgno);
+		__wr_dinternal(dest, dl->bytes, dl->ksize, rmp->pgno);
 		break;
 	default:
 		assert(0);	
 	}
 	di = GETDINTERNAL(pdp, indx);
-	di->pgno = l_mp->pgno;
+	di->pgno = lmp->pgno;
+
+	//eprintf("<%ld %ld %ld>\n", pmp->pgno, lmp->pgno, rmp->pgno);
+	bt_page_mark_dirty(lmp);
+	bt_page_mark_dirty(rmp);
 	return pdp != old_pdp;
 }
 
@@ -891,7 +909,7 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 		while (MP_ISFULL(pmp)) {
 			__set_state_reorging(pmp);
 			bt_page_unlock(pmp);
-			err = __bt_split(t, pmp);
+			err = __bt_split_inline(t, pmp);
 			assert(err == 0);
 			bt_page_put(pmp);
 			pmp = __bt_get_parent_excl(t, mp, &indx);
@@ -901,20 +919,20 @@ static int __bt_split(BTREE *t, struct mpage *mp)
 		pmp_need_split = __bt_page(t, mp, pmp, indx, lmp, rmp);
 	}
 	
-	if (MP_ISLEAF(mp)) {
-		lmp_need_split = MP_NEED_SPLIT(lmp);
-		rmp_need_split = MP_NEED_SPLIT(rmp);
-	}
+	lmp_need_split = MP_NEED_SPLIT(lmp);
+	rmp_need_split = MP_NEED_SPLIT(rmp);
+	
+	bt_page_mark_dirty(pmp);
 	bt_page_unlock(pmp);
 	__set_state_deleted(mp);
-	bt_page_put(pmp);
-	if (new_root) 
+	if (new_root)
 		bt_page_put(new_root);
 	if (!lmp_need_split || !__insert_split_queue(lmp))
 		bt_page_put(lmp);
 	if (!rmp_need_split || !__insert_split_queue(rmp))
 		bt_page_put(rmp);
-	bt_page_put(pmp);
+	if (!pmp_need_split || !__insert_split_queue(pmp))
+		bt_page_put(pmp);
 	return 0;
 }
 
@@ -937,9 +955,11 @@ struct mpage * __bt_delete(BTREE *t, struct mpage *mp)
 		dp->flags &= ~DP_INTERNAL;
 		dp->flags |= DP_LEAF;
 		dp->lower = DP_HDRLEN;
-		dp->upper = mp->size; /* xxx: extened ? */
+		dp->upper = mp->size; /* xxx: extended ? */
+		bt_page_mark_dirty(mp);
 		bt_page_unlock(mp);
 		__set_state_normal(mp);
+		assert(0);
 		/* xxx: signal state change. */
 		return NULL;
 	} else {
@@ -1009,15 +1029,21 @@ int __bt_reorg(BTREE *t, struct mpage *mp)
 	int err;
 
 	bt_page_wrlock(mp);
-	assert(MP_ISLEAF(mp));
 	if (MP_ISEMPTY(mp)) {
-		return __bt_reorg_delete(t, mp);
+		if (MP_ISLEAF(mp))
+			return __bt_reorg_delete(t, mp);
+		else {
+			__set_state_normal(mp);
+			bt_page_unlock(mp);
+			__signal_state_change(mp);
+		}
+
 	} else {
 		return __bt_reorg_split(t, mp);
 	}
 }
 
-int __bt_split_leaf_inline(BTREE *t, struct mpage *mp)
+int __bt_split_inline(BTREE *t, struct mpage *mp)
 {
 	int err;
 	pthread_mutex_lock(&reorg_qlock);
@@ -1054,7 +1080,7 @@ __bt_put(BTREE *t, const DBT *key, const DBT *val)
 	while (MP_ISFULL(mp)) {
 		assert(mp->size <= 16 << PAGE_SHFT);
 		bt_page_unlock(mp);
-		err = __bt_split_leaf_inline(t, mp);			
+		err = __bt_split_inline(t, mp);			
 		assert(err == 0);
 		bt_page_put(mp);
 		mp = __bt_get_leaf_excl(t, key);
@@ -1130,7 +1156,7 @@ bt_alloc(const char *path)
 {
 
 }
-#define MAX_ELE     (1000000)
+#define MAX_ELE     (1000)
 #define MAX_THREAD  (16)
 
 #define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
@@ -1266,7 +1292,7 @@ void test(void)
 	uint32_t k;
 	pthread_t lthread[MAX_THREAD],ithread[MAX_THREAD],dthread[MAX_THREAD];
 
-	for (k=0; k<1000; k++)  {
+	for (k=0; k<10; k++)  {
 		unsigned long i;
 		fprintf(stdout, "START:%d...",k);
 		srandom(k);
@@ -1363,14 +1389,13 @@ int main()
 	}
 	pm_system_init(fd);
 	bm_system_init();
-
-	tt.bt_cmp = __bt_defcmp;
 	bt_page_system_init();
 
+	tt.bt_cmp = __bt_defcmp;
+
 	mp_md = bt_page_get(BT_MDPGNO);
-	if (IS_ERR(mp_md)) {
+	if (IS_ERR(mp_md)) 
 		return PTR_ERR(mp_md);
-	}
 	mp_md->dp->flags = DP_METADATA;
 
 	mp = bt_page_new(PAGE_SIZE);
@@ -1381,6 +1406,7 @@ int main()
 	dp->flags = DP_LEAF;
 	dp->lower = DP_HDRLEN;
 	dp->upper = mp->size;
+	bt_page_mark_dirty(mp);
 	bt_page_put(mp);
 
 	mp_md->dp->root_pgno = mp->pgno;
@@ -1396,9 +1422,11 @@ int main()
 	pthread_cond_broadcast(&reorg_qcond);
 	for (i = 0; i < NORG; i++) 
 		pthread_join(reorganisers[i], NULL);
-	print_tree(t);
+
+	bt_page_system_exit();
+	bm_system_exit();
+	pm_system_exit();
+	//print_tree(t);
 }
-
-
 #ifdef BT_MKFS
 #endif

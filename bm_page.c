@@ -2,6 +2,36 @@
 
 static pg_mgr_t *pm;
 
+void
+bm_page_rdlock(struct mpage *mp)
+{
+	pm_page_rdlock(pm, mp);
+}
+
+void
+bm_page_wrlock(struct mpage *mp)
+{
+	pm_page_wrlock(pm, mp);
+}
+
+void
+bm_page_unlock(struct mpage *mp)
+{
+	pm_page_unlock(pm, mp);
+}
+
+void
+bm_page_mark_dirty(struct mpage *mp)
+{
+	pm_page_mark_dirty(pm, mp);
+}
+
+struct mpage *
+bm_page_get_nowait(pgno_t pgno)
+{
+	return pm_page_get_nowait(pm, pgno + 1);
+}
+
 struct mpage *
 bm_page_get(pgno_t pgno)
 {

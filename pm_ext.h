@@ -44,11 +44,13 @@ extern void		 pm_page_rdlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_wrlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_unlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_delete(pg_mgr_t *, struct mpage *);
+extern void		 pm_page_mark_dirty(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_put(pg_mgr_t *, struct mpage *);
 extern struct mpage	*pm_page_get_new(pg_mgr_t *, pgno_t, size_t);
 extern struct mpage	*pm_page_get_nowait(pg_mgr_t *, pgno_t);
 extern struct mpage	*pm_page_get(pg_mgr_t *, pgno_t);
 extern int		 pm_system_init(int);
+extern void		 pm_system_exit(void);
 extern pg_mgr_t		*pm_alloc(size_t, init_mpage_t, exit_mpage_t);
 extern void		 pm_free(pg_mgr_t *);
 #endif

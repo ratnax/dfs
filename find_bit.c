@@ -163,8 +163,13 @@ clear_bit(long nr, volatile unsigned long *addr)
 
 # define _BITOPS_LONG_SHIFT 6
 
+#ifdef __GCC_ASM_FLAG_OUTPUTS__
 # define CC_SET(c) "\n\t/* output condition code " #c "*/\n"
 # define CC_OUT(c) "=@cc" #c
+#else
+# define CC_SET(c) "\n\tset" #c " %[_cc_" #c "]\n"
+# define CC_OUT(c) [_cc_ ## c] "=qm"
+#endif
 
 static __always_inline int constant_test_bit(long nr, const volatile unsigned long *addr)
 {
@@ -174,7 +179,7 @@ static __always_inline int constant_test_bit(long nr, const volatile unsigned lo
 
 static __always_inline int variable_test_bit(long nr, volatile const unsigned long *addr)
 {
-	int oldbit;
+	bool oldbit;
 
 	asm volatile("bt %2,%1\n\t"
 		     CC_SET(c)
@@ -197,5 +202,9 @@ static int test_bit(int nr, const volatile unsigned long *addr);
 	(__builtin_constant_p((nr))		\
 	 ? constant_test_bit((nr), (addr))	\
 	 : variable_test_bit((nr), (addr)))
+
+
+#define test_bit2(nr, addr)			\
+	 constant_test_bit((nr), (addr))	
 
 

@@ -1,3 +1,4 @@
+set print thread-events off
 define mp_flags
 	if $arg0->state == MP_STATE_INIT
 		printf "INIT"
@@ -78,7 +79,7 @@ define list_rec
 	set $mp=$arg0
 	set $dp=$mp->dp
 	set $k = 0 
-	set $count = ($dp->lower - 16) / 2 +1
+	set $count = ($dp->lower - 16) / 2 
 
 	while $k < $count
 		if ($dp->flags & 0x2)
@@ -102,7 +103,7 @@ define list_rec
 	end
 	printf "\n"
 	set $k = 0 
-	set $count = ($dp->lower - 16) / 2+1
+	set $count = ($dp->lower - 16) / 2
 
 	while $k < $count
 		if ($dp->flags & 0x2)

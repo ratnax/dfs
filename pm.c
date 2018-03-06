@@ -5,6 +5,7 @@ int db_fd;
 static void
 __page_free(pg_mgr_t *pm, struct page *pg)
 {
+	printf("releasing:%ld\n", pg->pgno);
 	pm->exit_mpage(PG2MPG(pg));
 	if (pg->dp)
 		free(pg->dp); 
@@ -36,8 +37,11 @@ __lookup_locked_htab(pg_mgr_t *pm, pgno_t pgno)
 	head = &pm->hash_table[HASHKEY(pgno)];
 	hlist_for_each_entry(pg, head, hq) {
 		if (pg->pgno == pgno) {
-			if (pg->count == 0) 
+			if (pg->count == 0) {
+				if (pg->state == NEW || pg->state == UPTODATE)
+					pm->nlru--;
 				list_del(&pg->q);	
+			}
 			pg->count++;
 			return pg;
 		}
@@ -109,22 +113,36 @@ __page_init(pg_mgr_t *pm, struct page *pg, uint64_t pgno, uint32_t size)
 }
 
 static void
-__page_put(pg_mgr_t *pm, struct page *pg)
+__page_put_locked(pg_mgr_t *pm, struct page *pg)
 {
-	pthread_mutex_lock(&pm->lock);
+	assert(pg->count > 0);
 	if (--pg->count == 0) {
 		if (pg->stale) {
 			pthread_mutex_unlock(&pm->lock);
 			__page_free(pm, pg);
+			pthread_mutex_lock(&pm->lock);
 			return;
 		}
+		assert(pg->size == PAGE_SIZE);
 		switch (pg->state) {
 		case NEW:
 		case UPTODATE:
 			list_add_tail(&pg->q, &pm->clean_lru_pages);
+			if (pm->nlru++ == 100) {
+				pg = list_first_entry(&pm->clean_lru_pages,
+				    struct page, q);
+
+				__delete_locked_htab(pm, pg);
+				list_del(&pg->q);
+				pm->nlru--;
+				pthread_mutex_unlock(&pm->lock);
+				__page_free(pm, pg);
+				pthread_mutex_lock(&pm->lock);
+			}
 			break;
 		case DIRTY:
 			list_add_tail(&pg->q, &pm->dirty_lru_pages);
+			pthread_cond_signal(&pm->cond);
 			break;
 		case WRITING:
 		case COWED:
@@ -134,14 +152,22 @@ __page_put(pg_mgr_t *pm, struct page *pg)
 			assert(0);
 		}
 	}
+}
+
+static void
+__page_put(pg_mgr_t *pm, struct page *pg)
+{
+	pthread_mutex_lock(&pm->lock);
+	__page_put_locked(pm, pg);
 	pthread_mutex_unlock(&pm->lock);
 }
 
 void
-pm_page_mark_dirty(pg_mgr_t *pm, struct page *pg)
+pm_page_mark_dirty(pg_mgr_t *pm, struct mpage *mp)
 {
-	assert(pg->count);
+	struct page *pg = MPG2PG(mp);
 
+	assert(pg->count);
 	pthread_mutex_lock(&pm->lock);
 	switch (pg->state) {
 	case NEW:
@@ -191,6 +217,7 @@ __page_read(pg_mgr_t *pm, struct page *pg)
 	if (pg->state == NEW) {
 		pg->state = READING;
 		pthread_mutex_unlock(&pm->lock);
+		printf("reading:%ld\n", pg->pgno);
 		b = pread(db_fd, pg->dp, PAGE_SIZE, pg->pgno << PAGE_SHFT);
 		pthread_mutex_lock(&pm->lock);
 		if (b == PAGE_SIZE)
@@ -218,9 +245,12 @@ __page_cow(pg_mgr_t *pm, struct page *pg)
 	assert(dp);
 	pthread_mutex_lock(&pm->lock);
 	if (pg->state == WRITING) {
+		assert(pg->size == PAGE_SIZE);
 		memcpy(dp, pg->dp, pg->size);
 		pg->dp = dp;
-		pg->state =  COWED;
+		pg->dp_mem = NULL;
+		pg->state = COWED;
+		printf("%ld COWED\n", pg->pgno);
 	}
 	pthread_mutex_unlock(&pm->lock);
 }	
@@ -231,6 +261,8 @@ __page_wrlock(pg_mgr_t *pm, struct page *pg)
 	pthread_rwlock_wrlock(&pg->lock);
 	assert(pg->writers == 0);
 	pg->writers++;
+
+	__page_cow(pm, pg);
 }
 
 static void
@@ -262,14 +294,11 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	ssize_t b;
 	int err;
 
-	pthread_mutex_lock(&pm->lock);
 	assert(!pg->stale);
 	switch (pg->state) {
 	case DIRTY:
-		__page_wrlock(pm, pg);
 		pg->state = WRITING;
 		dp = pg->dp;
-		__page_unlock(pm, pg);
 		break;
 	case NEW:
 	case UPTODATE:
@@ -283,6 +312,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	}
 	pthread_mutex_unlock(&pm->lock);
 
+	printf("Writing:%ld\n", pg->pgno);
 	b = pwrite(db_fd, dp, PAGE_SIZE, pg->pgno << PAGE_SHFT);
 	err = (b == PAGE_SIZE) ? 0 : -EIO;
     
@@ -311,7 +341,6 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 		assert(0);
 		break;
 	}
-	pthread_mutex_unlock(&pm->lock);
 	return err;
 }
 
@@ -341,7 +370,7 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 		if (!(new_pg = __page_new(pm, pgno, size))) 
 			return ERR_PTR(-ENOMEM);
 		pg = __lookup_and_insert_htab(pm, new_pg);
-    	} 
+	} 
 
 	pthread_mutex_lock(&pm->lock);
 	switch (pg->state) {
@@ -358,14 +387,15 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 			pthread_mutex_unlock(&pm->lock);
 	    		if ((err = __page_read(pm, pg))) {
 				__page_put(pm, pg);
-				return  ERR_PTR(err);
+				return ERR_PTR(err);
 			}
 			pthread_mutex_lock(&pm->lock);
 		}
 		break;
 	case WRITING:
+		printf("%ld in GET writing\n", pgno);
 		if (!pg->dp_mem && !(pg->dp_mem = malloc(size))) {
-			__page_put(pm, pg);
+			__page_put_locked(pm, pg);
 			return ERR_PTR(-ENOMEM);
 		}
 		break;
@@ -424,18 +454,22 @@ static void * syncer(void *arg)
 
 	pthread_mutex_lock(&pm->lock);
 	while (1) {
-		while (!(pg = list_first_entry(&pm->dirty_lru_pages,
-		    struct page, q)) && pm->active)
+		while (list_empty(&pm->dirty_lru_pages) && pm->active)
 			pthread_cond_wait(&pm->cond, &pm->lock);
-		if (!pg) 
+
+		if (!list_empty(&pm->dirty_lru_pages)) {
+			pg = list_first_entry(&pm->dirty_lru_pages,
+			    struct page, q);
+		} else  
 			break;
+
 		assert(pg->count == 0);
+		assert(pg->size == PAGE_SIZE);
 		list_del(&pg->q);
 		pg->count++;
-		pthread_mutex_unlock(&pm->lock);
+
 		__page_write(pm, pg);
-		__page_put(pm, pg);
-		pthread_mutex_lock(&pm->lock);
+		__page_put_locked(pm, pg);
 	}
 	pthread_mutex_unlock(&pm->lock);
 	return NULL;
@@ -459,6 +493,7 @@ pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb)
 	pm->init_mpage = init_cb;
 	pm->exit_mpage = exit_cb;
 	pm->mp_sz = mp_sz;
+	pm->active = true;
 
 	if ((err = pthread_create(&pm->syncer, NULL, syncer, (void *) pm))) {
 		free(pm);
@@ -470,7 +505,15 @@ pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb)
 void
 pm_free(pg_mgr_t *pm)
 {
+	pm->active = false;
+	pthread_cond_signal(&pm->cond);
+	pthread_join(pm->syncer, NULL);
 	free(pm);
+}
+
+void
+pm_system_exit(void)
+{
 }
 
 int
