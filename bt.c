@@ -923,6 +923,65 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 static int __bt_split_inline(BTREE *t, struct mpage *mp);
 
 static int
+__bt_put(BTREE *t, const DBT *key, const DBT *val)
+{
+	struct mpage *mp;
+	indx_t indx, indx1;
+	bool exact, extended;
+	int err;
+
+	mp = __bt_get_leaf_excl(t, key);
+	if (IS_ERR(mp)) 
+		return PTR_ERR(mp);
+	
+	while (MP_ISFULL(mp)) {
+		assert(mp->size <= 16 << PAGE_SHFT);
+		bt_page_unlock(mp);
+		err = __bt_split_inline(t, mp);			
+		assert(err == 0);
+		bt_page_put(mp);
+		mp = __bt_get_leaf_excl(t, key);
+		if (IS_ERR(mp)) 
+			return PTR_ERR(mp);
+	}
+	exact = __lookup_leaf(t, mp, key, &indx);
+	if (exact) {
+		bt_page_unlock(mp);
+		bt_page_put(mp);
+		return -EEXIST;
+		// __remove_leaf_at(mp, key, indx);
+	}
+	extended = __insert_leaf_at(t, mp, key, val, indx);
+	bt_page_unlock(mp);
+	if (!extended || !__insert_split_queue(mp))
+		bt_page_put(mp);
+	return 0;
+}
+
+static int
+__bt_del(BTREE *t, const DBT *key)
+{
+	struct mpage *mp;
+	indx_t indx;
+	bool exact, empty = false;
+	int err = 0;
+
+	mp = __bt_get_leaf_excl(t, key);
+	if (IS_ERR(mp)) 
+		return PTR_ERR(mp);
+	exact = __lookup_leaf(t, mp, key, &indx);
+	if (exact) {
+		empty = __remove_leaf_at(mp, key, indx);
+	} else { 
+		err = -ENOENT;	
+	}
+	bt_page_unlock(mp);
+	if (!empty || !__insert_delete_queue(mp))
+		bt_page_put(mp);
+	return err;
+}
+
+static int
 __bt_split(BTREE *t, struct mpage *mp)
 {
 	struct mpage *lmp, *rmp, *pmp, *new_root;
@@ -1014,6 +1073,13 @@ __bt_delete(BTREE *t, struct mpage *mp)
 	} else {
 		empty = __remove_internal_at(pmp, NULL, indx);
 		if (empty) {
+			pthread_mutex_lock(&reorg_qlock);
+			if (MP_INREORGQ(pmp)) {
+				TAILQ_REMOVE(&reorg_qhead, pmp, reorg_qentry);
+				__set_state_prereorg(pmp);
+			}
+			pthread_mutex_unlock(&reorg_qlock);
+
 			__set_state_deleting(pmp);
 			bt_page_unlock(pmp);
 			__set_state_deleted(mp);
@@ -1082,6 +1148,10 @@ __bt_reorg(BTREE *t, struct mpage *mp)
 	int err;
 
 	bt_page_wrlock(mp);
+	if (MP_REORGING(mp)) {
+		bt_page_unlock(mp);
+		return 0;
+	}
 	if (MP_ISEMPTY(mp)) {
 		if (MP_ISLEAF(mp))
 			return __bt_reorg_delete(t, mp);
@@ -1117,65 +1187,6 @@ __bt_split_inline(BTREE *t, struct mpage *mp)
 		pthread_mutex_unlock(&mp->mutex);
 		return 0;
 	}
-}
-
-static int
-__bt_put(BTREE *t, const DBT *key, const DBT *val)
-{
-	struct mpage *mp;
-	indx_t indx, indx1;
-	bool exact, extended;
-	int err;
-
-	mp = __bt_get_leaf_excl(t, key);
-	if (IS_ERR(mp)) 
-		return PTR_ERR(mp);
-	
-	while (MP_ISFULL(mp)) {
-		assert(mp->size <= 16 << PAGE_SHFT);
-		bt_page_unlock(mp);
-		err = __bt_split_inline(t, mp);			
-		assert(err == 0);
-		bt_page_put(mp);
-		mp = __bt_get_leaf_excl(t, key);
-		if (IS_ERR(mp)) 
-			return PTR_ERR(mp);
-	}
-	exact = __lookup_leaf(t, mp, key, &indx);
-	if (exact) {
-		bt_page_unlock(mp);
-		bt_page_put(mp);
-		return -EEXIST;
-		// __remove_leaf_at(mp, key, indx);
-	}
-	extended = __insert_leaf_at(t, mp, key, val, indx);
-	bt_page_unlock(mp);
-	if (!extended || !__insert_split_queue(mp))
-		bt_page_put(mp);
-	return 0;
-}
-
-static int
-__bt_del(BTREE *t, const DBT *key)
-{
-	struct mpage *mp;
-	indx_t indx;
-	bool exact, empty = false;
-	int err = 0;
-
-	mp = __bt_get_leaf_excl(t, key);
-	if (IS_ERR(mp)) 
-		return PTR_ERR(mp);
-	exact = __lookup_leaf(t, mp, key, &indx);
-	if (exact) {
-		empty = __remove_leaf_at(mp, key, indx);
-	} else { 
-		err = -ENOENT;	
-	}
-	bt_page_unlock(mp);
-	if (!empty || !__insert_delete_queue(mp))
-		bt_page_put(mp);
-	return err;
 }
 	
 static int exito;
@@ -1445,7 +1456,7 @@ void print_tree(BTREE *t)
 
 #define NORG 16
 
-int main()
+int main(int argc, char **argv)
 {
 	struct mpage *mp, *mp_md;
 	struct dpage *dp;
@@ -1453,7 +1464,7 @@ int main()
 	pthread_t reorganisers[NORG];
 	int i, fd;
 
-	fd = open("/home/ratna/maps", O_RDWR|O_CREAT, 0755);
+	fd = open(argv[1], O_RDWR|O_CREAT, 0755);
 	if (fd <= 0) {
 		fprintf(stderr, "Open failed (%s)\n", strerror(errno));
 		return (-errno);
