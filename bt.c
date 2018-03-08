@@ -617,6 +617,7 @@ static void
 __set_state_reorging(struct mpage *mp)
 {
 	assert(mp->state != MP_STATE_DELETED);
+//	assert(mp->state == MP_STATE_PREREORG);
 	printf("%d MP_STATE_REORGING\n", mp->pgno);
 	mp->state = MP_STATE_REORGING;
 }
@@ -921,7 +922,7 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 	return pdp != old_pdp;
 }
 
-static int __bt_split_inline(BTREE *t, struct mpage *mp);
+static int __bt_reorg_split(BTREE *t, struct mpage *mp);
 
 static int
 __bt_put(BTREE *t, const DBT *key, const DBT *val)
@@ -937,8 +938,12 @@ __bt_put(BTREE *t, const DBT *key, const DBT *val)
 	
 	while (MP_ISFULL(mp)) {
 		assert(mp->size <= 16 << PAGE_SHFT);
-		bt_page_unlock(mp);
-		err = __bt_split_inline(t, mp);			
+		if (MP_INREORGQ(mp)) {
+			TAILQ_REMOVE(&reorg_qhead, mp, reorg_qentry);
+			__set_state_prereorg(mp);
+		}
+		pthread_mutex_unlock(&reorg_qlock);
+		err = __bt_reorg_split(t, mp);			
 		assert(err == 0);
 		bt_page_put(mp);
 		mp = __bt_get_leaf_excl(t, key);
@@ -952,10 +957,11 @@ __bt_put(BTREE *t, const DBT *key, const DBT *val)
 		return -EEXIST;
 		// __remove_leaf_at(mp, key, indx);
 	}
-	extended = __insert_leaf_at(t, mp, key, val, indx);
+	if ((extended = __insert_leaf_at(t, mp, key, val, indx)))
+		extended = __insert_split_queue(mp);
 	bt_page_unlock(mp);
-	if (!extended || !__insert_split_queue(mp))
-		bt_page_put(mp);
+
+	if (!extended) bt_page_put(mp);
 	return 0;
 }
 
@@ -972,13 +978,14 @@ __bt_del(BTREE *t, const DBT *key)
 		return PTR_ERR(mp);
 	exact = __lookup_leaf(t, mp, key, &indx);
 	if (exact) {
-		empty = __remove_leaf_at(mp, key, indx);
+		if ((empty = __remove_leaf_at(mp, key, indx)))
+			empty = __insert_delete_queue(mp);
 	} else { 
 		err = -ENOENT;	
 	}
 	bt_page_unlock(mp);
-	if (!empty || !__insert_delete_queue(mp))
-		bt_page_put(mp);
+
+	if (!empty) bt_page_put(mp);
 	return err;
 }
 
@@ -1016,31 +1023,37 @@ __bt_split(BTREE *t, struct mpage *mp)
 		bt_page_mark_dirty(pmp);
 	} else {
 		while (MP_ISFULL(pmp)) {
-			__set_state_reorging(pmp);
-			bt_page_unlock(pmp);
-			err = __bt_split_inline(t, pmp);
+
+			pthread_mutex_lock(&reorg_qlock);
+			if (MP_INREORGQ(pmp)) {
+				TAILQ_REMOVE(&reorg_qhead, pmp, reorg_qentry);
+				__set_state_prereorg(pmp);
+			}
+			pthread_mutex_unlock(&reorg_qlock);
+			err = __bt_reorg_split(t, pmp);
 			assert(err == 0);
 			bt_page_put(pmp);
 			pmp = __bt_get_parent_excl(t, mp, &indx);
 			if (IS_ERR(pmp)) 
 				return PTR_ERR(pmp);
 		}
-		pmp_need_split = __bt_page(t, mp, pmp, indx, lmp, rmp);
+		if ((pmp_need_split = __bt_page(t, mp, pmp, indx, lmp, rmp))) 
+			pmp_need_split = __insert_split_queue(pmp);
+	    
 	}
 	
-	lmp_need_split = MP_NEED_SPLIT(lmp);
-	rmp_need_split = MP_NEED_SPLIT(rmp);
+	if ((lmp_need_split = MP_NEED_SPLIT(lmp)))
+		lmp_need_split = __insert_split_queue(lmp);
+	if ((rmp_need_split = MP_NEED_SPLIT(rmp)))
+		rmp_need_split = __insert_split_queue(rmp);
 	
 	bt_page_unlock(pmp);
 	__set_state_deleted(mp);
-	if (new_root)
-		bt_page_put(new_root);
-	if (!lmp_need_split || !__insert_split_queue(lmp))
-		bt_page_put(lmp);
-	if (!rmp_need_split || !__insert_split_queue(rmp))
-		bt_page_put(rmp);
-	if (!pmp_need_split || !__insert_split_queue(pmp))
-		bt_page_put(pmp);
+
+	if (new_root) bt_page_put(new_root);
+	if (!lmp_need_split) bt_page_put(lmp);
+	if (!rmp_need_split) bt_page_put(rmp);
+	if (!pmp_need_split) bt_page_put(pmp);
 	return 0;
 }
 
@@ -1149,7 +1162,6 @@ __bt_reorg(BTREE *t, struct mpage *mp)
 	int err;
 
 	bt_page_wrlock(mp);
-//	if (MP_REORGING(mp)) {
 	if (!MP_PREREORG(mp)) {
 		bt_page_unlock(mp);
 		return 0;
@@ -1168,29 +1180,6 @@ __bt_reorg(BTREE *t, struct mpage *mp)
 	}
 }
 
-static int
-__bt_split_inline(BTREE *t, struct mpage *mp)
-{
-	int err;
-	pthread_mutex_lock(&reorg_qlock);
-	if (MP_INREORGQ(mp)) {
-		TAILQ_REMOVE(&reorg_qhead, mp, reorg_qentry);
-		__set_state_prereorg(mp);
-		pthread_mutex_unlock(&reorg_qlock);
-		bt_page_put(mp);
-		err = __bt_reorg(t, mp);
-		assert(!err);
-		return err;
-	} else {
-		pthread_mutex_unlock(&reorg_qlock);
-		pthread_mutex_lock(&mp->mutex);
-		while (MP_REORGING(mp) || MP_PREREORG(mp))
-			pthread_cond_wait(&mp->cond, &mp->mutex);
-		pthread_mutex_unlock(&mp->mutex);
-		return 0;
-	}
-}
-	
 static int exito;
 
 static void *reorganiser(void *arg)
