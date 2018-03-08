@@ -105,7 +105,7 @@ __page_init(pg_mgr_t *pm, struct page *pg, uint64_t pgno, uint32_t size)
 	pg->readers = pg->writers = 0;
 	pg->dp_mem = NULL;
 	INIT_HLIST_NODE(&pg->hq);
-	if (!(pg->dp = calloc(1,  size)))
+	if (!(pg->dp = malloc(size)))
 		return (-ENOMEM);
 	return pm->init_mpage(PG2MPG(pg));
 }
@@ -228,6 +228,7 @@ __page_read(pg_mgr_t *pm, struct page *pg)
 		if (b == PAGE_SIZE)
 			pg->state = UPTODATE;
 		else {
+			assert(0);
 			pg->state = NEW;
 			err = -EIO;
 		}
@@ -333,17 +334,19 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 }
 
 static struct page *
-__page_new(pg_mgr_t *pm, pgno_t pgno, size_t size)
+__page_new(pg_mgr_t *pm, pgno_t pgno, size_t size, bool noread)
 {
 	int err;
 	struct page *pg;
 
-	if (!(pg = calloc(1, SIZEOF_PAGE(pm))))
+	if (!(pg = malloc(SIZEOF_PAGE(pm))))
 		return NULL;
 	if ((err = __page_init(pm, pg, pgno, size))) {
 		__page_free(pm, pg);
 		return NULL;
 	}
+	if (noread)
+		pg->state = DELETED;
 	return pg;
 }
 
@@ -355,7 +358,7 @@ __page_get(pg_mgr_t *pm, uint64_t pgno, size_t size, bool nowait, bool noread)
 	int err;
 
 	if (!(pg = __lookup_htab(pm, pgno))) {
-		if (!(new_pg = __page_new(pm, pgno, size))) 
+		if (!(new_pg = __page_new(pm, pgno, size, noread))) 
 			return ERR_PTR(-ENOMEM);
 		pg = __lookup_and_insert_htab(pm, new_pg);
 	} 
@@ -476,7 +479,7 @@ pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb, int max_nlru)
 	pg_mgr_t *pm;
 	int i, err;
 
-	if (!(pm = calloc(1, sizeof (pg_mgr_t))))
+	if (!(pm = malloc(sizeof (pg_mgr_t))))
 		return ERR_PTR(-ENOMEM);
 
 	INIT_LIST_HEAD(&pm->dirty_lru_pages);
@@ -504,8 +507,10 @@ pm_free(pg_mgr_t *pm)
 	struct page *pg, *tmp;
 	int i;
 
+	pthread_mutex_lock(&pm->lock);
 	pm->active = false;
 	pthread_cond_signal(&pm->cond);
+	pthread_mutex_unlock(&pm->lock);
 	pthread_join(pm->syncer, NULL);
 
 	list_for_each_entry_safe(pg, tmp, &pm->clean_lru_pages, q) {

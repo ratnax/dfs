@@ -116,6 +116,7 @@ typedef struct BTREE_s {
 #define DP_MAX_DSIZE	    256
 #define BT_MDPGNO	    (0)
 
+extern bool		 bt_page_isvalid(struct mpage *mp);
 extern void		 bt_page_mark_dirty(struct mpage *mp);
 extern void		 bt_page_rdlock(struct mpage *mp);
 extern void		 bt_page_wrlock(struct mpage *mp);

@@ -55,6 +55,12 @@ bt_page_new(size_t size)
 
 }
 
+bool
+bt_page_valid(struct mpage *mp)
+{
+	return bm_blk_alloced(mp->pgno);
+}
+
 void
 bt_page_rdlock(struct mpage *mp)
 {

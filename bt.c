@@ -579,6 +579,7 @@ __signal_state_change(struct mpage *mp)
 static void
 __set_state_deleted(struct mpage *mp)
 {
+	assert(mp->state == MP_STATE_REORGING);
 	pthread_mutex_lock(&mp->mutex);
 	printf("%d MP_STATE_DELETED\n", mp->pgno);
 	mp->state = MP_STATE_DELETED;
@@ -1148,7 +1149,8 @@ __bt_reorg(BTREE *t, struct mpage *mp)
 	int err;
 
 	bt_page_wrlock(mp);
-	if (MP_REORGING(mp)) {
+//	if (MP_REORGING(mp)) {
+	if (!MP_PREREORG(mp)) {
 		bt_page_unlock(mp);
 		return 0;
 	}
@@ -1221,7 +1223,7 @@ bt_alloc(const char *path)
 {
 
 }
-#define MAX_ELE     (1000000)
+#define MAX_ELE     (10000)
 #define MAX_THREAD  (16)
 
 #define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
@@ -1377,7 +1379,7 @@ void test(void)
 			assert(err == -ENOENT);
 		}
 	}
-	for (i = 0; i < 10000000; i++)  {
+	for (i = 0; i < 10; i++)  {
 		unsigned long j;
 		fprintf(stdout, "START:%d...", i);
 		srandom(i);
@@ -1402,7 +1404,8 @@ void print_subtree(struct mpage *mp, int level)
 {
 	int i;
 	struct dpage *dp = mp->dp;
-	
+
+	assert(bt_page_valid(mp));
 	if (MP_ISINTERNAL(mp)) {
 		for (i = 0; i < DP_NXTINDX(dp); i++) {
 			DINTERNAL *di = GETDINTERNAL(dp, i);
@@ -1412,6 +1415,7 @@ void print_subtree(struct mpage *mp, int level)
 			print_subtree(_mp, level + 1);
 			bt_page_put(_mp);
 		}
+		return;
 		eprintf("INTERNAL: %lu@%d\n", (uint64_t) mp->pgno, level);
 		for (i = 0; i < DP_NXTINDX(dp); i++) {
 			DINTERNAL *di = GETDINTERNAL(dp, i);
@@ -1427,6 +1431,7 @@ void print_subtree(struct mpage *mp, int level)
 		}
 		eprintf("\n");
 	} else {
+		return;
 		eprintf("LEAF: %lu@%d\n", (uint64_t) mp->pgno, level);
 		for (i = 0; i < DP_NXTINDX(dp); i++) {
 			DLEAF *di = GETDLEAF(dp, i);
@@ -1499,20 +1504,25 @@ int main(int argc, char **argv)
 	}
 	bt_page_put(mp_md);
 
+	print_tree(t);
+
 	TAILQ_INIT(&reorg_qhead);
 	pthread_mutex_init(&reorg_qlock, NULL);
 	pthread_cond_init(&reorg_qcond, NULL);
 	for (i = 0; i < NORG; i++) 
 		pthread_create(&reorganisers[i], NULL, reorganiser, t);
 	test();
+	pthread_mutex_lock(&reorg_qlock);
 	exito = 1;
 	pthread_cond_broadcast(&reorg_qcond);
+	pthread_mutex_unlock(&reorg_qlock);
 	for (i = 0; i < NORG; i++) 
 		pthread_join(reorganisers[i], NULL);
 
 	bt_page_system_exit();
 	bm_system_exit();
 	pm_system_exit();
+	return 0;
 	//print_tree(t);
 }
 #ifdef BT_MKFS
