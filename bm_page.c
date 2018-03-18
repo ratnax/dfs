@@ -44,6 +44,12 @@ bm_page_put(struct mpage *mp)
 	return pm_page_put(pm, mp);
 }
 
+int
+bm_txn_log_bmop(struct txn *tx, struct mpage *mp, int bu, int bit, bool set)
+{
+	return pm_txn_log_bmop(pm, tx, mp, bu, bit, set);
+}
+
 static int
 __init_mpage(struct mpage *mp)
 {

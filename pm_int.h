@@ -3,6 +3,7 @@
 
 #include "global.h"
 #include "pm_ext.h"
+#include "txn_int.h"
 #include "list.h"
 
 #define MAX_PAGES   (TOTAL_SPACE >> PAGE_SHFT)

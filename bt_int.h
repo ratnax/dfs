@@ -4,6 +4,7 @@
 #include "global.h"
 #include "bm_ext.h"
 #include "pm_ext.h"
+#include "txn_ext.h"
 
 typedef	uint16_t	indx_t;
 typedef struct dbt {
@@ -121,11 +122,29 @@ extern void		 bt_page_mark_dirty(struct mpage *mp);
 extern void		 bt_page_rdlock(struct mpage *mp);
 extern void		 bt_page_wrlock(struct mpage *mp);
 extern void		 bt_page_unlock(struct mpage *mp);
-extern void		 bt_page_free(struct mpage *mp);
+extern void		 bt_page_free(struct txn *tx, struct mpage *mp);
 extern void		 bt_page_put(struct mpage *mp);
 extern struct mpage	*bt_page_get_nowait(pgno_t pgno);
 extern struct mpage	*bt_page_get(pgno_t pgno);
-extern struct mpage	*bt_page_new(size_t size);
+extern struct mpage	*bt_page_new(struct txn *tx, size_t size);
 extern int		 bt_page_system_init(void);
 extern void		 bt_page_system_exit(void);
+
+extern struct txn	*bt_txn_alloc(void);
+extern void		 bt_txn_free(struct txn *tx);
+
+extern int	bt_txn_log_ins_leaf(struct txn *tx, struct mpage *mp,
+		    int ins_idx);
+extern int	bt_txn_log_del_leaf(struct txn *tx, struct mpage *mp,
+		    int del_idx);
+extern int	bt_txn_log_del_internal(struct txn *tx, struct mpage *mp,
+		    int del_idx);
+extern int	bt_txn_log_rep_leaf(struct txn *tx, struct mpage *mp,
+		    DBT *key, DBT *val, int rep_idx);
+extern int	bt_txn_log_split(struct txn *tx, struct mpage *pmp,
+		    struct mpage *mp, struct mpage *lmp, struct mpage *rmp,
+		    indx_t idx, indx_t spl_idx);
+extern int	bt_txn_log_newroot(struct txn *tx, struct mpage *pmp,
+		    struct mpage *mp, struct mpage *lmp, struct mpage *rmp,
+		    struct mpage *mdmp, indx_t spl_idx);
 #endif

@@ -2,6 +2,7 @@
 #define __PG_EXT_H__
 
 #include "global.h"
+#include "txn_ext.h"
 
 /* TODO: move this to bm_ext.h after fixing 'pages' in pm.c */
 #define TOTAL_SPACE (1024 * 1024 * 1024)
@@ -53,4 +54,20 @@ extern int		 pm_system_init(int);
 extern void		 pm_system_exit(void);
 extern pg_mgr_t		*pm_alloc(size_t, init_mpage_t, exit_mpage_t, int);
 extern void		 pm_free(pg_mgr_t *);
+
+extern int  pm_txn_log_ins(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,
+		void *rec, size_t rec_len, int ins_idx);
+extern int  pm_txn_log_del(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,
+		void *rec, size_t rec_len, int del_idx);
+extern int  pm_txn_log_rep(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,
+		void *orec, size_t orec_len, void *key, size_t key_len,
+		void *val, size_t val_len, int rep_idx);
+extern int  pm_txn_log_split(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
+		struct mpage *omp, struct mpage *lmp, struct mpage *rmp,
+		int idx, int splt_idx);
+extern int  pm_txn_log_newroot(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
+		struct mpage *omp, struct mpage *lmp, struct mpage *rmp,
+		struct mpage *mdmp, int ins_idx, int spl_idx);
+extern int  pm_txn_log_bmop(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,
+		int bu, int bit, bool set);
 #endif

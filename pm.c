@@ -317,6 +317,9 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	}
 	pthread_mutex_unlock(&pm->lock);
 
+	err = txn_commit_page(pg->pgno, dp, PAGE_SIZE);
+	assert(!err);
+
 	printf("Writing:%ld\n", pg->pgno);
 	b = pwrite(db_fd, dp, PAGE_SIZE, pg->pgno << PAGE_SHFT);
 	err = (b == PAGE_SIZE) ? 0 : -EIO;
@@ -471,6 +474,91 @@ static void * syncer(void *arg)
 	}
 	pthread_mutex_unlock(&pm->lock);
 	return NULL;
+}
+
+int
+pm_txn_log_ins(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, void *rec,
+    size_t rec_len, int ins_idx)
+{
+	struct page	*pg = MPG2PG(mp);
+	struct dpage	*dp = pg->dp;
+
+	return txn_log_ins(tx, pg->pgno, dp->lsn, rec, rec_len, ins_idx,
+	    &dp->lsn); 
+}
+
+int
+pm_txn_log_del(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, void *rec, 
+    size_t rec_len, int del_idx)
+		
+{
+	struct page	*pg = MPG2PG(mp);
+	struct dpage	*dp = pg->dp;
+
+	return txn_log_del(tx, pg->pgno, dp->lsn, rec, rec_len, del_idx,
+	    &dp->lsn);
+}
+
+int
+pm_txn_log_rep(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,
+    void *orec, size_t orec_len, void *key, size_t key_len, void *val,
+    size_t val_len, int rep_idx) 
+{	
+	struct page	*pg = MPG2PG(mp);
+	struct dpage	*dp = pg->dp;
+
+	return txn_log_rep(tx, pg->pgno, dp->lsn, orec, orec_len, key, key_len,
+	    val, val_len, rep_idx, &dp->lsn);  	
+}
+
+int
+pm_txn_log_split(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
+    struct mpage *omp, struct mpage *lmp, struct mpage *rmp, int ins_idx,
+    int spl_idx)
+{
+	struct page	*opg = MPG2PG(omp);
+	struct page	*lpg = MPG2PG(lmp);
+	struct page	*rpg = MPG2PG(rmp);
+	struct page	*ppg = MPG2PG(pmp);
+	struct dpage	*odp = opg->dp;
+	struct dpage	*ldp = lpg->dp;
+	struct dpage	*rdp = rpg->dp;
+	struct dpage	*pdp = ppg->dp;
+
+	return txn_log_split(tx, ppg->pgno, pdp->lsn, opg->pgno, odp->lsn,
+	    lpg->pgno, rpg->pgno, ins_idx, spl_idx, &pdp->lsn, &odp->lsn,
+	    &ldp->lsn, &rdp->lsn);
+}
+
+int
+pm_txn_log_newroot(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
+    struct mpage *omp, struct mpage *lmp, struct mpage *rmp,
+    struct mpage *mdmp, int ins_idx, int spl_idx)
+{
+	struct page	*opg = MPG2PG(omp);
+	struct page	*lpg = MPG2PG(lmp);
+	struct page	*rpg = MPG2PG(rmp);
+	struct page	*ppg = MPG2PG(pmp);
+	struct page	*mdpg = MPG2PG(mdmp);
+	struct dpage	*odp = opg->dp;
+	struct dpage	*ldp = lpg->dp;
+	struct dpage	*rdp = rpg->dp;
+	struct dpage	*pdp = ppg->dp;
+	struct dpage	*mddp = mdpg->dp;
+
+	return txn_log_newroot(tx, ppg->pgno, opg->pgno, odp->lsn,
+	    lpg->pgno, rpg->pgno, mdpg->pgno, mddp->lsn, ins_idx, spl_idx,
+	    &pdp->lsn, &odp->lsn, &ldp->lsn, &rdp->lsn, &mddp->lsn);
+}
+
+int
+pm_txn_log_bmop(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, int bu,
+    int bit, bool set)
+{
+	struct page	*pg = MPG2PG(mp);
+	struct dpage	*dp = pg->dp;
+
+	return txn_log_bmop(tx, pg->pgno, dp->lsn, bu, bit, set, &dp->lsn);
 }
 
 pg_mgr_t *

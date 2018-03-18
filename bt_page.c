@@ -3,6 +3,62 @@
 
 static pg_mgr_t *pm;
 
+struct txn *bt_txn_alloc(void)
+{
+	return txn_alloc();
+}
+
+void bt_txn_free(struct txn *tx)
+{
+	txn_free(tx);
+}
+
+int
+bt_txn_log_ins_leaf(struct txn *tx, struct mpage *mp, int ins_idx)
+{
+	DLEAF *dl = GETDLEAF(mp->dp, ins_idx);
+
+	return pm_txn_log_ins(pm, tx, mp, dl, NDLEAF(dl), ins_idx);
+}
+
+int
+bt_txn_log_del_leaf(struct txn *tx, struct mpage *mp, int del_idx)
+{
+	DLEAF *dl = GETDLEAF(mp->dp, del_idx);
+
+	return pm_txn_log_del(pm, tx, mp, dl, NDLEAF(dl), del_idx);
+}
+
+int
+bt_txn_log_del_internal(struct txn *tx, struct mpage *mp, int del_idx)
+{
+	DINTERNAL *di = GETDINTERNAL(mp->dp, del_idx);
+
+	return pm_txn_log_del(pm, tx, mp, di, NDINTERNAL(di->ksize), del_idx);
+}
+
+int
+bt_txn_log_rep_leaf(struct txn *tx, struct mpage *mp, DBT *key, DBT *val,
+    int rep_idx)
+{
+	DLEAF *dl = GETDLEAF(mp->dp, rep_idx);
+
+	return pm_txn_log_rep(pm, tx, mp, dl, NDLEAF(dl), key, key->size,
+	    val, val->size, rep_idx);
+}
+
+int bt_txn_log_split(struct txn *tx, struct mpage *pmp, struct mpage *mp,
+    struct mpage *lmp, struct mpage *rmp, indx_t idx, indx_t spl_idx)
+{
+	return pm_txn_log_split(pm, tx, pmp, mp, lmp, rmp, idx, spl_idx);
+}
+
+int bt_txn_log_newroot(struct txn *tx, struct mpage *pmp, struct mpage *mp,
+    struct mpage *lmp, struct mpage *rmp, struct mpage *mdmp, indx_t spl_idx)
+{
+	return pm_txn_log_newroot(pm, tx, pmp, mp, lmp, rmp, mdmp, 0, spl_idx); 
+}
+
 void
 bt_page_mark_dirty(struct mpage *mp)
 {
@@ -28,25 +84,25 @@ bt_page_put(struct mpage *mp)
 }
 
 void
-bt_page_free(struct mpage *mp)
+bt_page_free(struct txn *tx, struct mpage *mp)
 {
 	int err;
 
 	pm_page_delete(pm, mp);
 
-	err = bm_blk_free(mp->pgno);
+	err = bm_blk_free(tx, mp->pgno);
 	assert(!err);
 	printf("%ld Release\n", mp->pgno);
 	return;
 }
 
 struct mpage *
-bt_page_new(size_t size)
+bt_page_new(struct txn *tx, size_t size)
 {
 	struct mpage *mp;
 	pgno_t pgno;
  
-        pgno = bm_blk_alloc(PAGE_SHFT);
+        pgno = bm_blk_alloc(tx, PAGE_SHFT);
 	if (pgno < 0)
 		return ERR_PTR(pgno);	
 	printf("%ld Alloced\n", pgno);

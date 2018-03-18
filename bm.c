@@ -6,7 +6,8 @@
 static uint64_t *maps[MAX_UNIT_TYPE + 1];
 
 static long
-__blk_alloc(struct mpage *mp, uint64_t unit, uint64_t *map, int shft)
+__blk_alloc(struct txn *tx, struct mpage *mp, uint64_t unit, uint64_t *map,
+    int shft)
 {
 	unsigned long bit;
 	struct dpage *dp;
@@ -34,12 +35,13 @@ __blk_alloc(struct mpage *mp, uint64_t unit, uint64_t *map, int shft)
 	    (bit << shft)),  bit, mp->pgno, unit % DP_NBUNIT);
 	set_bit(bit, bu->map);
 	bm_page_mark_dirty(mp);
+	bm_txn_log_bmop(tx, mp, bu - dp->bu, bit, true); 
 	bm_page_unlock(mp);
 	return ((unit << MAX_UNIT_SHFT) + (bit << shft));
 }
 
 long
-bm_blk_alloc(int shft)
+bm_blk_alloc(struct txn *tx, int shft)
 {
 	struct mpage *mp;
 	uint64_t *map;
@@ -62,7 +64,7 @@ bm_blk_alloc(int shft)
 		mp = bm_page_get(pgno);
 		if (IS_ERR(mp))
 			return (PTR_ERR(mp));
-		ret = __blk_alloc(mp, unit, map, shft);
+		ret = __blk_alloc(tx, mp, unit, map, shft);
 		bm_page_put(mp);
 	} while (ret == -EAGAIN);
 
@@ -70,13 +72,14 @@ bm_blk_alloc(int shft)
 }
 
 int
-bm_blk_free(blk_t blk)
+bm_blk_free(struct txn *tx, blk_t blk)
 {
 	unsigned long unit = blk >> MAX_UNIT_SHFT;
 	unsigned long pgno = unit / DP_NBUNIT;
 	struct mpage *mp;
 	struct dpage *dp;
 	struct bunit *bu;
+	int bit;
 
 	mp = bm_page_get(pgno);
 	if (IS_ERR(mp))
@@ -84,10 +87,11 @@ bm_blk_free(blk_t blk)
 	bm_page_wrlock(mp);
 	dp = mp->dp;
 	bu = &dp->bu[unit % DP_NBUNIT];
+	bit = BLK2BIT(bu, blk);
 	printf("%ld clearing %ld in %ld:%ld\n",
-	    blk, BLK2BIT(bu, blk),mp->pgno, unit % DP_NBUNIT);
-	assert(test_bit(BLK2BIT(bu, blk), bu->map));
-	clear_bit(BLK2BIT(bu, blk), bu->map);
+	    blk, bit, mp->pgno, unit % DP_NBUNIT);
+	assert(test_bit(bit, bu->map));
+	clear_bit(bit, bu->map);
 	bu->nfree++;
 	if (bu->nfree == bu->nmax) {
 		clear_bit(unit, maps[bu->shft - MIN_UNIT_SHFT]);
@@ -97,6 +101,7 @@ bm_blk_free(blk_t blk)
 	} else if (bu->nfree == 1) {
 		set_bit(unit, maps[bu->shft - MIN_UNIT_SHFT]);
 	}
+	bm_txn_log_bmop(tx, mp, bu - dp->bu, bit, false); 
 	bm_page_mark_dirty(mp);
 	bm_page_unlock(mp);
 	bm_page_put(mp);
@@ -215,7 +220,7 @@ static void test(void)
 	for (i = 0; i < TEST_SIZE; i++) {
 		sizes[i] = (random() % 10) + MIN_UNIT_SHFT;
 
-		blocks[i] = bm_blk_alloc(sizes[i]);
+		blocks[i] = bm_blk_alloc(NULL, sizes[i]);
 		if (blocks[i] < 0) {
 			printf("ENOSPC at %ld %d, lost in frag %llu.\n",
 			    total, i, TOTAL_SPACE - total);
@@ -228,7 +233,7 @@ static void test(void)
 	}
 	for (i = i - 1; i >= 0; i--)
 		if (sizes[i])
-			bm_blk_free(blocks[i]);
+			bm_blk_free(NULL, blocks[i]);
 
 	for (i = 0; i < MAX_BUPAGES; i++) {
 		bread = pread(fd, &dp, PAGE_SIZE, (i + 1) << PAGE_SHFT);

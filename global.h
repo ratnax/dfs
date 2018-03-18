@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <sys/queue.h>
+#include <sys/uio.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>

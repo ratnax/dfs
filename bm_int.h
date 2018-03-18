@@ -50,4 +50,7 @@ extern struct mpage	*bm_page_get(pgno_t pgno);
 extern void		 bm_page_put(struct mpage *mp);
 extern void		 bm_page_system_exit(void);
 extern int		 bm_page_system_init(void);
+
+extern int		 bm_txn_log_bmop(struct txn *tx, struct mpage *mp,
+			    int bu, int bit, bool set);
 #endif
