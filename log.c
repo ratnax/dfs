@@ -15,7 +15,7 @@ struct sect_dlm {
 #define LOG_MRKR_SHFT		(sizeof (log_mrkr_t) << 3)
 #define LOG_COFF_SHFT		(sizeof (log_coff_t) << 3)
 
-#define LOG_ALIGN_SHFT		((SECT_SHFT > LOG_COFF_SHFT) ?		    \
+#define LOG_ALIGN_SHFT		((SECT_SHFT > LOG_COFF_SHFT) ?	\
 				 (SECT_SHFT - LOG_COFF_SHFT) : 0)
 #define LOG_ALIGN_SIZE		(1U << LOG_ALIGN_SHFT)
 #define LOG_ALIGN_MASK		(LOG_ALIGN_SIZE - 1)
@@ -298,9 +298,19 @@ log_commit(struct log *lg)
 	}
 	lg->coff = lg->off;
 	if (lg->off & SECT_MASK) {
+		int i;
+		void *sect = lg->sect;
+
 		memcpy(lg->iov, &lg->iov[lg->lsh_iovidx],
 		    sizeof (struct iovec) * (lg->iovidx - lg->lsh_iovidx));
 		lg->iovidx = lg->iovidx - lg->lsh_iovidx;
+
+		for (i = 1; i < lg->iovidx; i++) {
+			memcpy(sect, lg->iov[i].iov_base, lg->iov[i].iov_len);
+			lg->iov[i].iov_base = sect;
+			sect += lg->iov[i].iov_len;
+		}
+		assert(sect < lg->sect + SECT_SIZE);
 	} else if (lg->off < lg->size) {
 		hdr = __get_next_psh(lg);
 		hdr->mrkr = lg->mrkr;
