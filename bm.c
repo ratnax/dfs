@@ -112,7 +112,7 @@ bm_blk_locked_free(struct txn *tx, blk_t blk)
 }
 
 int
-bm_blk_unlock(struct txn *tx, blk_t blk)
+bm_blk_unlock(blk_t blk)
 {
 	unsigned long unit = blk >> MAX_UNIT_SHFT;
 	unsigned long pgno = unit / DP_NBUNIT;
@@ -345,7 +345,7 @@ static void test(void)
 	for (i = i - 1; i >= 0; i--) {
 		if (sizes[i]) {
 			bm_blk_locked_free(NULL, blocks[i]);
-			bm_blk_unlock(NULL, blocks[i]);
+			bm_blk_unlock(blocks[i]);
 		}
 	}
 	for (i = 0; i < MAX_BUPAGES; i++) {

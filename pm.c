@@ -6,7 +6,7 @@ static void
 __page_free(pg_mgr_t *pm, struct page *pg)
 {
 	printf("releasing:%ld\n", pg->pgno);
-	pm->exit_mpage(PG2MPG(pg));
+	pm->exit_mpage(PG2MPG(pg), pg->state == DELETED);
 	if (pg->dp)
 		free(pg->dp); 
 	if (pg->dp_mem)
@@ -119,7 +119,9 @@ __page_put_locked(pg_mgr_t *pm, struct page *pg)
 		case NEW:
 		case DELETED:
 			__delete_locked_htab(pm, pg);
+			pthread_mutex_unlock(&pm->lock);
 			__page_free(pm, pg);
+			pthread_mutex_lock(&pm->lock);
 			break;
 		case UPTODATE:
 			assert(pg->size == PAGE_SIZE);

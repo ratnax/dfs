@@ -72,7 +72,7 @@ __read_mpage(struct mpage *mp)
 }
 
 static void
-__exit_mpage(struct mpage *mp)
+__exit_mpage(struct mpage *mp, bool deleted)
 {
 	if (mp->lockmap_dp)
 		free(mp->lockmap_dp);

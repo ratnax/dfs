@@ -38,7 +38,7 @@ struct dpage;
 typedef struct page_mgr pg_mgr_t;
 typedef int (*init_mpage_t)(struct mpage *);
 typedef void (*read_mpage_t)(struct mpage *);
-typedef void (*exit_mpage_t)(struct mpage *);
+typedef void (*exit_mpage_t)(struct mpage *, bool);
 
 extern void		 pm_page_rdlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_wrlock(pg_mgr_t *, struct mpage *);

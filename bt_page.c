@@ -92,8 +92,6 @@ bt_page_free(struct txn *tx, struct mpage *mp)
 
 	err = bm_blk_locked_free(tx, mp->pgno);
 	assert(!err);
-	err = bm_blk_unlock(tx, mp->pgno);
-	assert(!err);
 	printf("%ld Release\n", mp->pgno);
 	return;
 }
@@ -153,8 +151,13 @@ __read_mpage(struct mpage *mp)
 }
 
 static void
-__exit_mpage(struct mpage *mp)
+__exit_mpage(struct mpage *mp, bool deleted)
 {
+	int err;
+	if (deleted) {
+		err = bm_blk_unlock(mp->pgno);
+		assert(!err);
+	}
 	return;	
 }
 
