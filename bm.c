@@ -10,22 +10,28 @@ __blk_alloc(struct txn *tx, struct mpage *mp, uint64_t unit, uint64_t *map,
     int shft)
 {
 	unsigned long bit;
-	struct dpage *dp;
-	struct bunit *bu;
+	struct dpage *dp, *lm_dp;
+	struct bunit *bu, *lm_bu;
 
 	bm_page_wrlock(mp);
+	lm_dp = mp->lockmap_dp;
 	dp = mp->dp;
+	lm_bu = &lm_dp->bu[unit % DP_NBUNIT];
 	bu = &dp->bu[unit % DP_NBUNIT];
-	if (bu->shft == MAX_UNIT_SHFT && bu->nfree) {
-		bu->shft = shft;
-		bu->nmax = bu->nfree = 1UL << (MAX_UNIT_SHFT - shft);
+	if (lm_bu->shft == MAX_UNIT_SHFT && lm_bu->nfree) {
+		bu->shft = lm_bu->shft = shft;
+		bu->nmax = bu->nfree = lm_bu->nmax = lm_bu->nfree = 
+		    1UL << (MAX_UNIT_SHFT - shft);
 		bu->nfree--;
+		lm_bu->nfree--;
 		set_bit(unit, map);
 		clear_bit(unit, maps[MAX_UNIT_TYPE]);
 		bit = 0;
-	} else if (bu->shft == shft && bu->nfree) {
-		bit = find_next_zero_bit(bu->map, bu->nmax, 0);
-		if (--bu->nfree == 0)
+	} else if (lm_bu->shft == shft && lm_bu->nfree) {
+		bit = find_next_zero_bit(lm_bu->map, lm_bu->nmax, 0);
+		bu->nfree--;
+		lm_bu->nfree--;
+		if (lm_bu->nfree == 0)
 			clear_bit(unit, map);
 	} else {
 		bm_page_unlock(mp);
@@ -33,6 +39,7 @@ __blk_alloc(struct txn *tx, struct mpage *mp, uint64_t unit, uint64_t *map,
 	}
 	printf("%ld setting %ld in %ld:%ld\n", ((unit << MAX_UNIT_SHFT) + 
 	    (bit << shft)),  bit, mp->pgno, unit % DP_NBUNIT);
+	set_bit(bit, lm_bu->map);
 	set_bit(bit, bu->map);
 	bm_page_mark_dirty(mp);
 	bm_txn_log_bmop(tx, mp, bu - dp->bu, bit, true); 
@@ -72,7 +79,7 @@ bm_blk_alloc(struct txn *tx, int shft)
 }
 
 int
-bm_blk_free(struct txn *tx, blk_t blk)
+bm_blk_locked_free(struct txn *tx, blk_t blk)
 {
 	unsigned long unit = blk >> MAX_UNIT_SHFT;
 	unsigned long pgno = unit / DP_NBUNIT;
@@ -94,6 +101,39 @@ bm_blk_free(struct txn *tx, blk_t blk)
 	clear_bit(bit, bu->map);
 	bu->nfree++;
 	if (bu->nfree == bu->nmax) {
+		bu->shft = MAX_UNIT_SHFT;
+		bu->nfree = bu->nmax = 1;
+	}
+	bm_txn_log_bmop(tx, mp, bu - dp->bu, bit, false); 
+	bm_page_mark_dirty(mp);
+	bm_page_unlock(mp);
+	bm_page_put(mp);
+	return (0);
+}
+
+int
+bm_blk_unlock(struct txn *tx, blk_t blk)
+{
+	unsigned long unit = blk >> MAX_UNIT_SHFT;
+	unsigned long pgno = unit / DP_NBUNIT;
+	struct mpage *mp;
+	struct dpage *dp;
+	struct bunit *bu;
+	int bit;
+
+	mp = bm_page_get(pgno);
+	if (IS_ERR(mp))
+		return (PTR_ERR(mp));
+	bm_page_wrlock_nocow(mp);
+	dp = mp->lockmap_dp;
+	bu = &dp->bu[unit % DP_NBUNIT];
+	bit = BLK2BIT(bu, blk);
+	printf("%ld clearing %ld in %ld:%ld\n",
+	    blk, bit, mp->pgno, unit % DP_NBUNIT);
+	assert(test_bit(bit, bu->map));
+	clear_bit(bit, bu->map);
+	bu->nfree++;
+	if (bu->nfree == bu->nmax) {
 		clear_bit(unit, maps[bu->shft - MIN_UNIT_SHFT]);
 		bu->shft = MAX_UNIT_SHFT;
 		bu->nfree = bu->nmax = 1;
@@ -101,8 +141,6 @@ bm_blk_free(struct txn *tx, blk_t blk)
 	} else if (bu->nfree == 1) {
 		set_bit(unit, maps[bu->shft - MIN_UNIT_SHFT]);
 	}
-	bm_txn_log_bmop(tx, mp, bu - dp->bu, bit, false); 
-	bm_page_mark_dirty(mp);
 	bm_page_unlock(mp);
 	bm_page_put(mp);
 	return (0);
@@ -155,7 +193,7 @@ void bm_system_exit()
 }
 
 int
-bm_system_init(void)
+bm_system_init(int fd)
 {
 	struct mpage *mp;
 	struct dpage *dp;
@@ -187,6 +225,79 @@ bm_system_init(void)
 	return (0);
 }
 
+int 
+bm_mkfs(int fd)
+{
+	int i, ret;
+	char blk[BLK_SIZE];
+	struct dpage *dp;
+	unsigned long bu_nbits;
+	unsigned long pg_nbits;
+	unsigned int npgs;
+	unsigned int nbus;
+	unsigned int nbits;
+	ssize_t bwrote;
+
+	dp = (struct dpage *) blk;
+	for (i = 0; i < DP_NBUNIT; i++) {
+		dp->bu[i].shft = MAX_UNIT_SHFT;
+		dp->bu[i].nmax = dp->bu[i].nfree = 1;
+		memset(dp->bu[i].map, 0, sizeof (dp->bu[i].map));
+	}
+	printf("Total units: %llu\n", TOTAL_UNITS);
+	printf("MAX_BUPAGES: %llu\n", MAX_BUPAGES);
+	for (i = 0; i < MAX_BUPAGES; i++) {
+		if (BLK_SIZE != (bwrote = pwrite(fd, dp, BLK_SIZE,
+		    (i + BM_PREMAP_PGS) << BLK_SHFT)))
+			return (-EIO);
+	}
+	bu_nbits = 1UL << (MAX_UNIT_SHFT - MIN_UNIT_SHFT);
+	pg_nbits = DP_NBUNIT * bu_nbits;
+	
+	npgs = (MAX_BUPAGES + TOTAL_RSRVD_PGS) / pg_nbits;
+	nbus = (MAX_BUPAGES + TOTAL_RSRVD_PGS - npgs * pg_nbits) / bu_nbits; 
+	nbits = (MAX_BUPAGES + TOTAL_RSRVD_PGS - npgs * pg_nbits -
+	    nbus * bu_nbits);
+
+	printf("npgs: %u\n", npgs);
+	printf("nbus: %u\n", nbus);
+	printf("nbits: %u\n", nbits);
+
+	for (i = 0; i < DP_NBUNIT; i++) {
+		dp->bu[i].shft = MIN_UNIT_SHFT;
+		dp->bu[i].nmax = MAX_UNIT_SIZE >> MIN_UNIT_SHFT;
+		dp->bu[i].nfree = 0;
+		memset(dp->bu[i].map, 0xff, sizeof (dp->bu[i].map));
+	}
+	for (i = 0; i < npgs; i++) {
+		if (BLK_SIZE != (bwrote = pwrite(fd, dp, BLK_SIZE,
+		    (i + BM_PREMAP_PGS) << BLK_SHFT)))
+			return (-EIO);
+	}
+	if (!nbus && !nbits) 
+	    return (fsync(fd));
+
+	for (i = nbus; i < DP_NBUNIT; i++) {
+		dp->bu[i].shft = MAX_UNIT_SHFT;
+		dp->bu[i].nmax = dp->bu[i].nfree = 1;
+		memset(dp->bu[i].map, 0, sizeof (dp->bu[i].map));
+	}
+	if (nbits) {
+		dp->bu[nbus].shft = MIN_UNIT_SHFT;
+		dp->bu[nbus].nmax = MAX_UNIT_SIZE >> MIN_UNIT_SHFT;
+		dp->bu[nbus].nfree = dp->bu[nbus].nmax; 
+	}
+	for (i = 0; i < nbits; i++) {
+		dp->bu[nbus].nfree--;
+		set_bit(i, dp->bu[nbus].map); 
+	}
+	if (PAGE_SIZE != (bwrote = pwrite(fd, dp, BLK_SIZE,
+	    (npgs + BM_PREMAP_PGS) << BLK_SHFT)))
+		return (-EIO);
+	if ((ret = fsync(fd)))
+		return ret;
+	return MAX_BUPAGES;
+}
 
 #ifdef TEST
 #include <time.h>
@@ -231,10 +342,12 @@ static void test(void)
 			total += 1 << sizes[i];
 		}
 	}
-	for (i = i - 1; i >= 0; i--)
-		if (sizes[i])
-			bm_blk_free(NULL, blocks[i]);
-
+	for (i = i - 1; i >= 0; i--) {
+		if (sizes[i]) {
+			bm_blk_locked_free(NULL, blocks[i]);
+			bm_blk_unlock(NULL, blocks[i]);
+		}
+	}
 	for (i = 0; i < MAX_BUPAGES; i++) {
 		bread = pread(fd, &dp, PAGE_SIZE, (i + 1) << PAGE_SHFT);
 		if (bread != PAGE_SIZE)
@@ -264,97 +377,9 @@ main()
 
 	pm_system_init(fd);
 	bm_page_system_init();
-	bm_system_init();
+	bm_system_init(0);
 
 	test();
 	return (0);
-}
-#endif
-
-#ifdef MKFS
-static int 
-mkb(int fd)
-{
-	int i;
-	char blk[BLK_SIZE];
-	struct dpage *dp;
-	unsigned long bu_nbits;
-	unsigned long pg_nbits;
-	unsigned int npgs;
-	unsigned int nbus;
-	unsigned int nbits;
-	ssize_t bwrote;
-
-	dp = (struct dpage *) blk;
-	for (i = 0; i < DP_NBUNIT; i++) {
-		dp->bu[i].shft = MAX_UNIT_SHFT;
-		dp->bu[i].nmax = dp->bu[i].nfree = 1;
-		memset(dp->bu[i].map, 0, sizeof (dp->bu[i].map));
-	}
-	printf("Total units: %llu\n", TOTAL_UNITS);
-	printf("MAX_BUPAGES: %llu\n", MAX_BUPAGES);
-	for (i = 0; i < MAX_BUPAGES; i++) {
-		bwrote = pwrite(fd, dp, BLK_SIZE, (i + 1) << BLK_SHFT);
-		if (bwrote != BLK_SIZE)
-			return (-EIO);
-	}
-	bu_nbits = 1UL << (MAX_UNIT_SHFT - MIN_UNIT_SHFT);
-	pg_nbits = DP_NBUNIT * bu_nbits;
-	
-	npgs = (MAX_BUPAGES + 1) / pg_nbits;
-	nbus = (MAX_BUPAGES + 1 - npgs * pg_nbits) / bu_nbits; 
-	nbits = (MAX_BUPAGES + 1 - npgs * pg_nbits - nbus * bu_nbits);
-
-	printf("npgs: %u\n", npgs);
-	printf("nbus: %u\n", nbus);
-	printf("nbits: %u\n", nbits);
-
-	for (i = 0; i < DP_NBUNIT; i++) {
-		dp->bu[i].shft = MIN_UNIT_SHFT;
-		dp->bu[i].nmax = MAX_UNIT_SIZE >> MIN_UNIT_SHFT;
-		dp->bu[i].nfree = 0;
-		memset(dp->bu[i].map, 0xff, sizeof (dp->bu[i].map));
-	}
-	for (i = 0; i < npgs; i++) {
-		bwrote = pwrite(fd, dp, BLK_SIZE, (i + 1) << BLK_SHFT);
-		if (bwrote != BLK_SIZE)  
-		    return (-EIO);
-	}
-	if (!nbus && !nbits) 
-	    return (fsync(fd));
-
-	for (i = nbus; i < DP_NBUNIT; i++) {
-		dp->bu[i].shft = MAX_UNIT_SHFT;
-		dp->bu[i].nmax = dp->bu[i].nfree = 1;
-		memset(dp->bu[i].map, 0, sizeof (dp->bu[i].map));
-	}
-	if (nbits) {
-		dp->bu[nbus].shft = MIN_UNIT_SHFT;
-		dp->bu[nbus].nmax = MAX_UNIT_SIZE >> MIN_UNIT_SHFT;
-		dp->bu[nbus].nfree = dp->bu[nbus].nmax; 
-	}
-	for (i = 0; i < nbits; i++) {
-		dp->bu[nbus].nfree--;
-		set_bit(i, dp->bu[nbus].map); 
-	}
-	bwrote = pwrite(fd, dp, BLK_SIZE, (npgs + 1) << BLK_SHFT);
-	if (bwrote != PAGE_SIZE)  
-		return (-EIO);
-	return (fsync(fd));
-}
-
-int 
-main(int argc, char **argv)
-{
-	int fd, ret;
-
-	fd = open(argv[1], O_RDWR|O_CREAT, 0755);
-	if (fd <= 0) {
-		fprintf(stderr, "Open failed (%s)\n", strerror(errno));
-		return -errno;
-	}
-	ret = mkb(fd);
-	close(fd);
-	return ret;
 }
 #endif

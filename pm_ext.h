@@ -2,10 +2,8 @@
 #define __PG_EXT_H__
 
 #include "global.h"
-#include "txn_ext.h"
-
-/* TODO: move this to bm_ext.h after fixing 'pages' in pm.c */
-#define TOTAL_SPACE (1024 * 1024 * 1024)
+#include "tx_ext.h"
+#include "ondisk_format.h"
 
 #define PAGE_SHFT   (9)
 #define PAGE_SIZE   (1U<<PAGE_SHFT)
@@ -39,6 +37,7 @@ struct dpage;
 
 typedef struct page_mgr pg_mgr_t;
 typedef int (*init_mpage_t)(struct mpage *);
+typedef void (*read_mpage_t)(struct mpage *);
 typedef void (*exit_mpage_t)(struct mpage *);
 
 extern void		 pm_page_rdlock(pg_mgr_t *, struct mpage *);
@@ -46,13 +45,15 @@ extern void		 pm_page_wrlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_unlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_delete(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_mark_dirty(pg_mgr_t *, struct mpage *);
+extern void		 pm_page_wrlock_nocow(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_put(pg_mgr_t *, struct mpage *);
 extern struct mpage	*pm_page_get_new(pg_mgr_t *, pgno_t, size_t);
 extern struct mpage	*pm_page_get_nowait(pg_mgr_t *, pgno_t);
 extern struct mpage	*pm_page_get(pg_mgr_t *, pgno_t);
 extern int		 pm_system_init(int);
 extern void		 pm_system_exit(void);
-extern pg_mgr_t		*pm_alloc(size_t, init_mpage_t, exit_mpage_t, int);
+extern pg_mgr_t		*pm_alloc(size_t, init_mpage_t, read_mpage_t,
+			    exit_mpage_t, int);
 extern void		 pm_free(pg_mgr_t *);
 
 extern int  pm_txn_log_ins(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,

@@ -5,12 +5,12 @@ static pg_mgr_t *pm;
 
 struct txn *bt_txn_alloc(void)
 {
-	return txn_alloc();
+	return tx_alloc();
 }
 
 void bt_txn_free(struct txn *tx)
 {
-	txn_free(tx);
+	tx_free(tx);
 }
 
 int
@@ -90,7 +90,9 @@ bt_page_free(struct txn *tx, struct mpage *mp)
 
 	pm_page_delete(pm, mp);
 
-	err = bm_blk_free(tx, mp->pgno);
+	err = bm_blk_locked_free(tx, mp->pgno);
+	assert(!err);
+	err = bm_blk_unlock(tx, mp->pgno);
 	assert(!err);
 	printf("%ld Release\n", mp->pgno);
 	return;
@@ -145,6 +147,12 @@ __init_mpage(struct mpage *mp)
 }
 
 static void
+__read_mpage(struct mpage *mp)
+{
+	return;	
+}
+
+static void
 __exit_mpage(struct mpage *mp)
 {
 	return;	
@@ -161,9 +169,8 @@ bt_page_system_exit(void)
 int
 bt_page_system_init(void)
 {
-	pm = pm_alloc(sizeof (struct mpage), &__init_mpage, &__exit_mpage,
-	    1000);
-	if (IS_ERR(pm))
+	if (IS_ERR(pm = pm_alloc(sizeof (struct mpage), &__init_mpage,
+	    &__read_mpage, &__exit_mpage, 1000)))
 		return (PTR_ERR(pm));
 	return (0);
 }

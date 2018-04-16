@@ -4,13 +4,11 @@
 #include "global.h"
 #include "bm_ext.h"
 #include "pm_ext.h"
-#include "txn_ext.h"
+#include "tx_ext.h"
+#include "bt_ext.h"
+#include "list.h"
 
 typedef	uint16_t	indx_t;
-typedef struct dbt {
-	void	*data;
-	size_t	 size;
-} DBT;
 
 #define	DP_METADATA	0x01
 #define	DP_INTERNAL	0x02
@@ -28,8 +26,8 @@ struct dpage {
 
 		/* Leaf/Internal page. */
 		struct {
-			indx_t lower;/* lower bound of free space on page */
-			indx_t upper;/* upper bound of free space on page */
+			indx_t lower;	/* lower bound of free space on page */
+			indx_t upper;	/* upper bound of free space on page */
 			indx_t linp[0];	/* indx_t-aligned VAR. LENGTH DATA */
 		} __attribute__((packed));
 	} __attribute__((packed));
@@ -55,7 +53,7 @@ struct mpage {
 	mp_state_t state;
     	pthread_cond_t cond;
 	pthread_mutex_t mutex;
-	TAILQ_ENTRY(mpage) reorg_qentry;
+	struct list_head reorg_qentry;
 };
 
 #define MP_NORMAL(mp)		((mp)->state == MP_STATE_NORMAL)
@@ -109,9 +107,11 @@ typedef struct dleaf {
 #define MP_ISINTERNAL(mp) 	DP_ISINTERNAL((mp)->dp)
 #define MP_ISMETADATA(mp)	DP_ISMETADATA((mp)->dp)
 
-typedef struct BTREE_s {
+struct btree {
 	int (*bt_cmp)(const DBT *a, const DBT *b);
-} BTREE;
+	struct list_head list;
+	struct list_head reorg_qhead;
+};
 
 #define DP_MAX_KSIZE	    256
 #define DP_MAX_DSIZE	    256

@@ -15,6 +15,12 @@ bm_page_wrlock(struct mpage *mp)
 }
 
 void
+bm_page_wrlock_nocow(struct mpage *mp)
+{
+	pm_page_wrlock_nocow(pm, mp);
+}
+
+void
 bm_page_unlock(struct mpage *mp)
 {
 	pm_page_unlock(pm, mp);
@@ -29,13 +35,13 @@ bm_page_mark_dirty(struct mpage *mp)
 struct mpage *
 bm_page_get_nowait(pgno_t pgno)
 {
-	return pm_page_get_nowait(pm, pgno + 1);
+	return pm_page_get_nowait(pm, pgno + BM_PREMAP_PGS);
 }
 
 struct mpage *
 bm_page_get(pgno_t pgno)
 {
-	return pm_page_get(pm, pgno + 1);
+	return pm_page_get(pm, pgno + BM_PREMAP_PGS);
 }
 
 void
@@ -53,13 +59,23 @@ bm_txn_log_bmop(struct txn *tx, struct mpage *mp, int bu, int bit, bool set)
 static int
 __init_mpage(struct mpage *mp)
 {
+	if (!(mp->lockmap_dp = malloc(mp->size)))
+		return -ENOMEM;
 	pthread_mutex_init(&mp->mutex, NULL);
 	return 0;
 }
 
 static void
+__read_mpage(struct mpage *mp)
+{
+	memcpy(mp->lockmap_dp, mp->dp, mp->size);
+}
+
+static void
 __exit_mpage(struct mpage *mp)
 {
+	if (mp->lockmap_dp)
+		free(mp->lockmap_dp);
 	return;	
 }
 
@@ -73,8 +89,8 @@ bm_page_system_exit(void)
 int 
 bm_page_system_init(void)
 {
-	pm = pm_alloc(sizeof (struct mpage), __init_mpage, __exit_mpage, 100);
-	if (IS_ERR(pm)) 
+	if (IS_ERR(pm = pm_alloc(sizeof (struct mpage), __init_mpage,
+	    __read_mpage, __exit_mpage, 100)))
 		return PTR_ERR(pm);
 	return 0;
 }

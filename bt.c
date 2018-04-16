@@ -9,10 +9,10 @@
 
 #include "bt_int.h"
 
-static TAILQ_HEAD(reorg_queue, mpage) reorg_qhead;
-
 static pthread_mutex_t reorg_qlock;
 static pthread_cond_t reorg_qcond;
+static struct list_head tree_list;
+static pthread_mutex_t tree_list_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void
 __wr_dinternal(void *dest, void *key, size_t ksize, pgno_t pgno)
@@ -553,8 +553,8 @@ __remove_internal_at(struct mpage *mp, DBT *key, indx_t indx)
 	return MP_ISEMPTY(mp);
 }
 
-static int
-__bt_get(BTREE *t, const DBT *key, const DBT *val)
+int
+bt_get(BTREE *t, const DBT *key, const DBT *val)
 {
 	int err;
 	struct mpage *mp;
@@ -640,13 +640,13 @@ __set_state_splitting(struct mpage *mp)
 }
 
 static bool
-__insert_reorg_queue(struct mpage *mp) 
+__insert_reorg_queue(BTREE *t, struct mpage *mp) 
 {
 	bool inserted = false;
 	assert(mp->pgno);
 	pthread_mutex_lock(&reorg_qlock);
 	if (MP_NORMAL(mp)) {
-		TAILQ_INSERT_TAIL(&reorg_qhead, mp, reorg_qentry);
+		list_add_tail(&mp->reorg_qentry, &t->reorg_qhead);
 		__set_state_inreorgq(mp);
 		pthread_cond_signal(&reorg_qcond);
 		inserted = true;
@@ -656,15 +656,15 @@ __insert_reorg_queue(struct mpage *mp)
 }
 
 static bool
-__insert_split_queue(struct mpage *mp)
+__insert_split_queue(BTREE *t, struct mpage *mp)
 {
-	return __insert_reorg_queue(mp);
+	return __insert_reorg_queue(t, mp);
 }
 
 static bool
-__insert_delete_queue(struct mpage *mp)
+__insert_delete_queue(BTREE *t, struct mpage *mp)
 {
-	return __insert_reorg_queue(mp);
+	return __insert_reorg_queue(t, mp);
 }
 
 static int 
@@ -924,8 +924,8 @@ __bt_page(BTREE *t, struct mpage *mp, struct mpage *pmp, indx_t indx,
 
 static int __bt_reorg_split(struct txn *tx, BTREE *t, struct mpage *mp);
 
-static int
-__bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
+int
+bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
 {
 	struct mpage *mp;
 	indx_t indx, indx1;
@@ -939,7 +939,7 @@ __bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
 	while (MP_ISFULL(mp)) {
 		assert(mp->size <= 16 << PAGE_SHFT);
 		if (MP_INREORGQ(mp)) {
-			TAILQ_REMOVE(&reorg_qhead, mp, reorg_qentry);
+			list_del(&mp->reorg_qentry);
 			__set_state_prereorg(mp);
 		}
 		pthread_mutex_unlock(&reorg_qlock);
@@ -958,7 +958,7 @@ __bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
 		// __remove_leaf_at(mp, key, indx);
 	}
 	if ((extended = __insert_leaf_at(t, mp, key, val, indx)))
-		extended = __insert_split_queue(mp);
+		extended = __insert_split_queue(t, mp);
 
 	err = bt_txn_log_ins_leaf(tx, mp, indx); 
 	assert(!err);
@@ -968,8 +968,8 @@ __bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
 	return 0;
 }
 
-static int
-__bt_del(struct txn *tx, BTREE *t, const DBT *key)
+int
+bt_del(struct txn *tx, BTREE *t, const DBT *key)
 {
 	struct mpage *mp;
 	indx_t indx;
@@ -984,7 +984,7 @@ __bt_del(struct txn *tx, BTREE *t, const DBT *key)
 		err = bt_txn_log_del_leaf(tx, mp, indx); 
 		assert(!err);
 		if ((empty = __remove_leaf_at(mp, key, indx)))
-			empty = __insert_delete_queue(mp);
+			empty = __insert_delete_queue(t, mp);
 	} else { 
 		err = -ENOENT;	
 	}
@@ -1034,7 +1034,7 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 
 			pthread_mutex_lock(&reorg_qlock);
 			if (MP_INREORGQ(pmp)) {
-				TAILQ_REMOVE(&reorg_qhead, pmp, reorg_qentry);
+				list_del(&pmp->reorg_qentry);
 				__set_state_prereorg(pmp);
 			}
 			pthread_mutex_unlock(&reorg_qlock);
@@ -1046,16 +1046,16 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 				return PTR_ERR(pmp);
 		}
 		if ((pmp_need_split = __bt_page(t, mp, pmp, indx, lmp, rmp))) 
-			pmp_need_split = __insert_split_queue(pmp);
+			pmp_need_split = __insert_split_queue(t, pmp);
 	    
 		err = bt_txn_log_split(tx, pmp, mp, lmp, rmp, indx, splt_indx); 
 		assert(!err);
 	}
 	
 	if ((lmp_need_split = MP_NEED_SPLIT(lmp)))
-		lmp_need_split = __insert_split_queue(lmp);
+		lmp_need_split = __insert_split_queue(t, lmp);
 	if ((rmp_need_split = MP_NEED_SPLIT(rmp)))
-		rmp_need_split = __insert_split_queue(rmp);
+		rmp_need_split = __insert_split_queue(t, rmp);
 	
 	bt_page_unlock(pmp);
 	__set_state_deleted(tx, mp);
@@ -1102,7 +1102,7 @@ __bt_delete(struct txn *tx, BTREE *t, struct mpage *mp)
 		if (empty) {
 			pthread_mutex_lock(&reorg_qlock);
 			if (MP_INREORGQ(pmp)) {
-				TAILQ_REMOVE(&reorg_qhead, pmp, reorg_qentry);
+				list_del(&pmp->reorg_qentry);
 				__set_state_prereorg(pmp);
 			}
 			pthread_mutex_unlock(&reorg_qlock);
@@ -1198,22 +1198,35 @@ static int exito;
 static void *reorganiser(void *arg)
 {
 	int err;
-	BTREE *t = (BTREE *) arg;
 	struct mpage *mp;
 	struct txn *tx;
+	BTREE *t;
 
 	while (1) {
 		pthread_mutex_lock(&reorg_qlock);
-		while ((mp = reorg_qhead.tqh_first) == NULL && !exito)
-			pthread_cond_wait(&reorg_qcond, &reorg_qlock);
-		if (mp) {
-		   	TAILQ_REMOVE(&reorg_qhead, mp, reorg_qentry);
-			__set_state_prereorg(mp);
+		mp = NULL;
+		while (1) {
+			pthread_mutex_lock(&tree_list_lock);
+			list_for_each_entry(t, &tree_list, list) {
+				if (list_empty(&t->reorg_qhead))
+					continue;
+				pthread_mutex_unlock(&tree_list_lock);
+
+		    		mp = list_first_entry(&t->reorg_qhead,
+				    struct mpage, reorg_qentry);
+
+				list_del(&mp->reorg_qentry);
+				__set_state_prereorg(mp);
+				break;
+			}
+			pthread_mutex_unlock(&tree_list_lock);
+			if (!mp && !exito)
+				pthread_cond_wait(&reorg_qcond, &reorg_qlock);
 		}
 		pthread_mutex_unlock(&reorg_qlock);
-		if (!mp)
+		if (!mp) 
 			break;
-		tx = txn_alloc();
+		tx = tx_alloc();
 		assert(!IS_ERR(tx));
 		
 		err = __bt_reorg(tx, t, mp);
@@ -1225,206 +1238,36 @@ static void *reorganiser(void *arg)
 	}
 }
 	
-BTREE tt, *t = &tt;
-
-BTREE *
-bt_alloc(const char *path)
+int
+bt_mkfs(int fd, pgno_t root_pgno)
 {
+	struct dpage *dp;
+	ssize_t b;
+	int ret;
 
-}
-#define MAX_ELE     (10000)
-#define MAX_THREAD  (16)
+	if (!(dp = calloc(PAGE_SIZE, 1)))
+		return -ENOMEM;
 
-#define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
-
-char bitmap[MAX_ELE / 8 + 1];
-
-int switcher[][3] = { {0, 1, 2},
-                      {0, 2, 1},
-                      {1, 0, 2},
-                      {1, 2, 0},
-                      {2, 0, 1},
-                      {2, 1 ,0} };
-int si;
-
-static void shuffle(uint32_t *arr)
-{
-	int i, j;
-
-	for (i = 0; i < MAX_REGIONS; i++) {
-		j = random() % (i + 1);
-		arr[i] = arr[j];
-		arr[j] = i;
+	dp->flags = DP_LEAF;
+	dp->lower = DP_HDRLEN;
+	dp->upper = PAGE_SIZE;
+	if (PAGE_SIZE != (b = pwrite(fd, dp, PAGE_SIZE, root_pgno << 12))) {
+		free(dp);
+		return -EIO;
 	}
+
+	dp->flags = DP_METADATA;
+	dp->root_pgno = root_pgno;
+	if (PAGE_SIZE != (b = pwrite(fd, dp, PAGE_SIZE, BT_MD_PGNO << 12))) {
+		free(dp);
+		return -EIO;
+	}
+	free(dp);
+	return 0;
 }
 
-static void *looker(
-	void *arg)
-{
-	unsigned long id  = (unsigned long) arg;
-	int err, i;
-	uint32_t key;
-	uint32_t kmem[64];
-	uint32_t vmem[64];
-	uint32_t p[MAX_REGIONS];
-	DBT k, v;
-
-	memset(kmem, 0, sizeof(kmem));
-	memset(vmem, 0, sizeof(vmem));
-	shuffle(p);
-
-	k.data = kmem;
-	k.size = 32;
-	v.data = vmem;
-	v.size = 250;
-	for (i = 0; i < MAX_REGIONS; i++) {
-		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][0];
-		kmem[0] = key;
-		vmem[0] = key;
-		err = __bt_get(t, &k, &v); 
-		if (!err) {
-			assert(bitmap[key >> 3] & (1 << (key % 8)));
-		} else if (err == -ENOENT) {
-			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
-		} else {
-			fprintf(stderr, "error in lookup\n");
-		}
-	}
-	return NULL;
-}
-
-static void *inserter(
-	void *arg)
-{
-	unsigned long id  = (unsigned long) arg;
-	uint32_t key;
-	uint32_t kmem[64];
-	uint32_t vmem[64];
-	uint32_t p[MAX_REGIONS];
-	int err, i;
-	DBT k, v;
-	struct txn *tx;
-
-	memset(kmem, 0, sizeof(kmem));
-	memset(vmem, 0, sizeof(vmem));
-	shuffle(p);
-
-	k.data = kmem;
-	k.size = 32;
-	v.data = vmem;
-	v.size = 250;
-	for (i = 0; i < MAX_REGIONS; i++) {
-		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][1];
-		kmem[0] = key;
-		vmem[0] = key;
-		v.size = 250; //key % 249 + 1;
-
-		tx = txn_alloc();
-		assert(!IS_ERR(tx));
-
-		err = __bt_put(tx, t, &k, &v); 
-		if (!err) {	
-			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
-			// assert(v.size == key % 249 + 1);
-			__sync_fetch_and_or(&bitmap[key >> 3], 1 << (key % 8));
-		} else if (err == -EEXIST) {
-			assert(bitmap[key >> 3] & (1 << (key % 8)));
-		} else {
-			fprintf(stderr, "error in insert\n");
-		}
-		err = txn_commit(tx);
-		assert(!err);
-		txn_free(tx);
-	}
-	return NULL;
-}
-
-static void *deleter(
-	void *arg)
-{
-	unsigned long id  = (unsigned long) arg;
-	int err, i;
-	uint32_t key;
-	uint32_t kmem[64];
-	uint32_t p[MAX_REGIONS];
-	DBT k;
-	struct txn *tx;
-
-	memset(kmem, 0, sizeof(kmem));
-	shuffle(p);
-
-	k.data = kmem;
-	k.size = 32;
-	for (i = 0; i < MAX_REGIONS; i++) {
-		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][2];
-		kmem[0] = key;
-
-		tx = txn_alloc();
-		assert(!IS_ERR(tx));
-		err = __bt_del(tx, t, &k);
-		if (!err) {
-			assert(bitmap[key >> 3] & (1 << (key % 8)));
-			__sync_fetch_and_and(&bitmap[key >> 3],
-			    ~(1U << (key % 8)));
-		} else if (err == -ENOENT) {
-			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
-		} else {
-			fprintf(stderr, "error in delete\n");
-		}
-		err = txn_commit(tx);
-		assert(!err);
-		txn_free(tx);
-	}
-	return NULL;
-}
-
-void test(void)
-{
-	pthread_t lthread[MAX_THREAD],ithread[MAX_THREAD],dthread[MAX_THREAD];
-	uint32_t kmem[64];
-	uint32_t vmem[64];
-	uint32_t i;
-	DBT k, v;
-	int err;
-
-	memset(kmem, 0, sizeof(kmem));
-	memset(vmem, 0, sizeof(vmem));
-
-	k.data = kmem;
-	k.size = 32;
-	v.data = vmem;
-	v.size = 250;
-	for (i = 0; i < MAX_ELE; i++) {
-		kmem[0] = i;
-		err = __bt_get(t, &k, &v); 
-		if (!err) {
-			bitmap[i / 8] |= (1 << (i % 8));
-		} else {
-			assert(err == -ENOENT);
-		}
-	}
-	for (i = 0; i < 10; i++)  {
-		unsigned long j;
-		fprintf(stdout, "START:%d...", i);
-		srandom(i);
-		for (j = 0; j < MAX_THREAD; j++)
-			pthread_create(&lthread[j], NULL, looker,   (void*) j);
-		for (j = 0; j < MAX_THREAD; j++)
-			pthread_create(&ithread[j], NULL, inserter, (void*) j);
-		for (j = 0; j < MAX_THREAD; j++)
-			pthread_create(&dthread[j], NULL, deleter,  (void*) j);
-		for (j = 0; j < MAX_THREAD; j++)
-			pthread_join(lthread[j], NULL);
-		for (j = 0; j < MAX_THREAD; j++)
-			pthread_join(ithread[j], NULL);
-		for (j = 0; j < MAX_THREAD; j++)
-			pthread_join(dthread[j], NULL);
-		fprintf(stdout, "DONE.\n");
-		si = (si + 1) % 6;
-	}
-}
-
-void print_subtree(struct mpage *mp, int level)
+static void
+print_subtree(struct mpage *mp, int level)
 {
 	int i;
 	struct dpage *dp = mp->dp;
@@ -1483,81 +1326,51 @@ void print_tree(BTREE *t)
 	//check_pages();
 }
 
-#define NORG 16
-
-int main(int argc, char **argv)
+BTREE *
+bt_alloc(void)
 {
-	struct mpage *mp, *mp_md;
-	struct dpage *dp;
-	pthread_t testers[16];
-	pthread_t reorganisers[NORG];
-	int i, fd;
-	int err;
+	BTREE *t;
 
-	fd = open(argv[1], O_RDWR|O_CREAT, 0755);
-	if (fd <= 0) {
-		fprintf(stderr, "Open failed (%s)\n", strerror(errno));
-		return (-errno);
-	}
-	pm_system_init(fd);
-	bm_system_init();
-	bt_page_system_init();
-	err = txn_system_init();
-	assert(!err);
+	if (!(t = malloc(sizeof(BTREE))))
+		return ERR_PTR(-ENOMEM);
+	t->bt_cmp = __bt_defcmp;
+	INIT_LIST_HEAD(&t->reorg_qhead);
+	pthread_mutex_lock(&tree_list_lock);
+	list_add_tail(&t->list, &tree_list);
+	pthread_mutex_unlock(&tree_list_lock);
+	return t;
+}
 
-	tt.bt_cmp = __bt_defcmp;
+#define NORG 16
+static pthread_t reorganisers[NORG];
 
-	mp_md = bt_page_get(BT_MDPGNO);
-	if (IS_ERR(mp_md)) 
-		return PTR_ERR(mp_md);
+void bt_system_exit(void)
+{
+	int i;
 
-	if (!MP_ISMETADATA(mp_md) || !mp_md->dp->root_pgno) {
-
-		struct txn *tx = txn_alloc();
-		assert(!IS_ERR(tx));
-
-		eprintf("NEW BTREE\n");
-		mp = bt_page_new(tx, PAGE_SIZE);
-		if (IS_ERR(mp)) {
-			return PTR_ERR(mp);
-		}
-		dp = mp->dp;
-		dp->flags = DP_LEAF;
-		dp->lower = DP_HDRLEN;
-		dp->upper = mp->size;
-		bt_page_mark_dirty(mp);
-		bt_page_put(mp);
-
-		mp_md->dp->flags = DP_METADATA;
-		mp_md->dp->root_pgno = mp->pgno;
-		bt_page_mark_dirty(mp_md);
-
-		txn_commit(tx);
-		txn_free(tx);
-	}
-	bt_page_put(mp_md);
-
-	print_tree(t);
-
-	TAILQ_INIT(&reorg_qhead);
-	pthread_mutex_init(&reorg_qlock, NULL);
-	pthread_cond_init(&reorg_qcond, NULL);
-	for (i = 0; i < NORG; i++) 
-		pthread_create(&reorganisers[i], NULL, reorganiser, t);
-	test();
 	pthread_mutex_lock(&reorg_qlock);
 	exito = 1;
 	pthread_cond_broadcast(&reorg_qcond);
 	pthread_mutex_unlock(&reorg_qlock);
 	for (i = 0; i < NORG; i++) 
 		pthread_join(reorganisers[i], NULL);
-
 	bt_page_system_exit();
-	bm_system_exit();
-	pm_system_exit();
-	txn_system_exit();
-	return 0;
-	//print_tree(t);
 }
-#ifdef BT_MKFS
-#endif
+
+int bt_system_init(int fd)
+{
+	int i, ret;
+
+	bt_page_system_init();
+
+	pthread_mutex_init(&reorg_qlock, NULL);
+	pthread_cond_init(&reorg_qcond, NULL);
+	INIT_LIST_HEAD(&tree_list);
+
+	for (i = 0; i < NORG; i++) {
+		if ((ret = pthread_create(&reorganisers[i], NULL,
+		    reorganiser, NULL)))
+			return ret;
+	}
+	return 0;
+}

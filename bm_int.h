@@ -4,8 +4,9 @@
 #include "global.h"
 #include "pm_ext.h"
 #include "bm_ext.h"
+#include "ondisk_format.h"
 
-
+#define TOTAL_RSRVD_PGS	(BM_PREMAP_PGS + BM_POSTMAP_PGS)
 #define TOTAL_BLKS	(TOTAL_SPACE >> BLK_SHFT)
 #define	MAX_UNIT_TYPE	(9)
 
@@ -38,14 +39,16 @@ struct dpage {
 
 struct mpage {
 	MPAGE_STRUCT_HDR;
+	struct dpage *lockmap_dp;
 	pthread_mutex_t mutex;
 };
 
 extern void		 bm_page_mark_dirty(struct mpage *mp);
 extern void		 bm_page_rdlock(struct mpage *mp);
 extern void		 bm_page_wrlock(struct mpage *mp);
+extern void		 bm_page_wrlock_nocow(struct mpage *mp);
 extern void		 bm_page_unlock(struct mpage *mp);
-extern struct mpage	*bm_page_get_nowait(pgno_t pgno);
+extern struct mpage	*bm_page_get_nocow(pgno_t pgno);
 extern struct mpage	*bm_page_get(pgno_t pgno);
 extern void		 bm_page_put(struct mpage *mp);
 extern void		 bm_page_system_exit(void);

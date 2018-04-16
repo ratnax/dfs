@@ -225,9 +225,10 @@ __page_read(pg_mgr_t *pm, struct page *pg)
 		printf("reading:%ld\n", pg->pgno);
 		b = pread(db_fd, pg->dp, PAGE_SIZE, pg->pgno << PAGE_SHFT);
 		pthread_mutex_lock(&pm->lock);
-		if (b == PAGE_SIZE)
+		if (b == PAGE_SIZE) {
+			pm->read_mpage(PG2MPG(pg));
 			pg->state = UPTODATE;
-		else {
+		} else {
 			assert(0);
 			pg->state = NEW;
 			err = -EIO;
@@ -262,13 +263,14 @@ __page_cow(pg_mgr_t *pm, struct page *pg)
 }	
 
 static void
-__page_wrlock(pg_mgr_t *pm, struct page *pg)
+__page_wrlock(pg_mgr_t *pm, struct page *pg, bool cow)
 {
 	pthread_rwlock_wrlock(&pg->lock);
 	assert(pg->writers == 0);
 	pg->writers++;
 
-	__page_cow(pm, pg);
+	if (cow)
+	    __page_cow(pm, pg);
 }
 
 static void
@@ -317,7 +319,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	}
 	pthread_mutex_unlock(&pm->lock);
 
-	err = txn_commit_page(pg->pgno, dp, PAGE_SIZE);
+	err = tx_commit_page(pg->pgno, dp, PAGE_SIZE);
 	assert(!err);
 
 	printf("Writing:%ld\n", pg->pgno);
@@ -437,7 +439,13 @@ pm_page_rdlock(pg_mgr_t *pm, struct mpage *mp)
 void
 pm_page_wrlock(pg_mgr_t *pm, struct mpage *mp)
 {
-	__page_wrlock(pm, MPG2PG(mp));
+	__page_wrlock(pm, MPG2PG(mp), true);
+}
+
+void
+pm_page_wrlock_nocow(pg_mgr_t *pm, struct mpage *mp)
+{
+	__page_wrlock(pm, MPG2PG(mp), false);
 }
 
 void 
@@ -562,7 +570,8 @@ pm_txn_log_bmop(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, int bu,
 }
 
 pg_mgr_t *
-pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb, int max_nlru)
+pm_alloc(size_t mp_sz, init_mpage_t init_cb, read_mpage_t read_cb, 
+    exit_mpage_t exit_cb, int max_nlru)
 {
 	pg_mgr_t *pm;
 	int i, err;
@@ -577,6 +586,7 @@ pm_alloc(size_t mp_sz, init_mpage_t init_cb, exit_mpage_t exit_cb, int max_nlru)
 	pthread_mutex_init(&pm->lock, NULL);
 	pthread_cond_init(&pm->cond, NULL);
 	pm->init_mpage = init_cb;
+	pm->read_mpage = read_cb;
 	pm->exit_mpage = exit_cb;
 	pm->max_nlru = max_nlru;
 	pm->mp_sz = mp_sz;

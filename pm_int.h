@@ -3,7 +3,7 @@
 
 #include "global.h"
 #include "pm_ext.h"
-#include "txn_int.h"
+#include "tx_int.h"
 #include "list.h"
 
 #define MAX_PAGES   (TOTAL_SPACE >> PAGE_SHFT)
@@ -57,6 +57,7 @@ struct page_mgr {
 	struct hlist_head	hash_table[HASHSIZE];
 
 	init_mpage_t init_mpage;
+	read_mpage_t read_mpage;
 	exit_mpage_t exit_mpage;
 	size_t mp_sz;
 	bool active;
