@@ -2,8 +2,8 @@
 #include "lm_int.h"
 
 static pthread_mutex_t list_lock = PTHREAD_MUTEX_INITIALIZER;
-struct list_head full_logs;
-struct list_head active_logs;
+static struct lm_log_t **logs;
+static int head, tail;
 
 static loff_t
 __encode_coff(lm_log_t *lg, loff_t coff)
@@ -77,20 +77,11 @@ __iov_available(lm_log_t *lg)
 	return lg->iovmax - lg->iovidx;
 }
 
-int
-log_write(lm_log_t *lg, void *data, size_t size)
+static void
+__log_write(lm_log_t *lg, void *data, size_t size)
 {
-	size_t len = 0;
-	size_t iov_needed;
-	int ret;
+	size_t len;
 
-	if (log_space_available(lg) < size)
-		return -ENOSPC;
-	if ((iov_needed = __iov_needed(lg, size)) > __iov_available(lg) &&
-	    (ret = log_commit(lg)))
-		return ret;
-	if (iov_needed > __iov_available(lg))
-		return -ENOSPC;
 	if ((lg->coff >> SECT_SHFT) == (lg->off >> SECT_SHFT)) {
 		len = __log_sector(lg, data, size);
 		lg->fst_iovidx = lg->iovidx;
@@ -110,7 +101,67 @@ log_write(lm_log_t *lg, void *data, size_t size)
 
 		len = __log_sector(lg, data + len, size);
 	}
+}
+
+int
+log_writev(lm_log_t *lg, struct iovec *iov, size_t iovcnt, size_t size)
+{
+	size_t len = 0;
+	size_t iov_needed;
+	int ret, i;
+
+	if (log_space_available(lg) < size)
+		return -ENOSPC;
+	if ((iov_needed = iovcnt + __iov_needed(lg, size)) > 
+	    __iov_available(lg) && (ret = log_commit(lg)))
+		return ret;
+	if (iov_needed > __iov_available(lg))
+		return -ENOSPC;
+	for (i = 0; i < iovcnt; i++)
+		__log_write(lg, iov[i].iov_base, iov[i].iov_len);
 	return 0;
+}
+
+int
+log_write(lm_log_t *lg, void *data, size_t size)
+{
+	size_t len = 0;
+	size_t iov_needed;
+	int ret;
+
+	if (log_space_available(lg) < size)
+		return -ENOSPC;
+	if ((iov_needed = __iov_needed(lg, size)) > __iov_available(lg) &&
+	    (ret = log_commit(lg)))
+		return ret;
+	if (iov_needed > __iov_available(lg))
+		return -ENOSPC;
+	__log_write(lg, data, size);
+	return 0;
+}
+
+lm_log_t *
+lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
+{
+	lm_log_t *lg;
+	int ret;
+
+	while (head != tail) {
+		lg = logs[head];
+
+		if (-ENOSPC == (ret = log_writev(lg, iov, iovcnt, size))) {
+			if ((ret = log_commit(lg)))
+				return ERR_PTR(ret);
+			head++;	
+		} else {
+			if (!ret) {
+				lg->commit_count++;	
+				return lg;
+			}
+			return ERR_PTR(ret);
+		}
+	}
+	return ERR_PTR(-ENOSPC);
 }
 
 lm_log_t *
@@ -119,23 +170,16 @@ lm_write(void *data, size_t size)
 	lm_log_t *lg;
 	int ret;
 
-	pthread_mutex_lock(&list_lock);
-	while ((lg = list_first_entry(&active_logs, lm_log_t, list))) {
-		pthread_mutex_unlock(&list_lock);
+    	while (head != tail) {
+		lg = logs[head];
 
-		ret = log_write(lg, data, size);
-
-		if (ret == -ENOSPC) {
+		if (-ENOSPC == (ret = log_write(lg, data, size))) {
 			if ((ret = log_commit(lg)))
 				return ERR_PTR(ret);
-			pthread_mutex_lock(&list_lock);
-			list_del(&lg->list);
-			list_add(&full_logs, &lg->list);
+			head++;	
 		} else {
 			if (!ret) {
-				pthread_mutex_lock(&list_lock);
 				lg->commit_count++;	
-				pthread_mutex_unlock(&list_lock);
 				return lg;
 			}
 			return ERR_PTR(ret);
@@ -147,10 +191,7 @@ lm_write(void *data, size_t size)
 int 
 lm_commit(void)
 {
-	lm_log_t *lg;
-
-	lg = list_first_entry(&active_logs, lm_log_t, list);
-	return log_commit(lg);
+	return log_commit(logs[head]);
 }
 
 int
@@ -158,19 +199,15 @@ log_put(lm_log_t *lg)
 {
 	int ret = 0;
 
-	pthread_mutex_lock(&list_lock);
-	if (lg->commit_count == 1) {
-		pthread_mutex_unlock(&list_lock);
-		if ((ret = log_finish(lg)))
-			return ret;
-		pthread_mutex_lock(&list_lock);
-		lg->commit_count = 0;
-		list_del(&lg->list);
-		list_add_tail(&lg->list, &active_logs);
-	} else {
-		--lg->commit_count;
+	--lg->commit_count;
+	for ( ;tail < head; tail++) {
+		if (logs[tail]->commit_count == 0) {
+			if ((ret = log_finish(lg)))
+				return ret;
+			tail++;
+		}
+		break;
 	}
-	pthread_mutex_unlock(&list_lock);
 	return ret;
 }
 
@@ -579,16 +616,14 @@ int lm_system_init(int fd, loff_t off)
 
 	if (!(buf = malloc(8192)))
 		return -ENOMEM;
-
-	INIT_LIST_HEAD(&full_logs);
-	INIT_LIST_HEAD(&active_logs);
-
+	if (!(logs = calloc(TX_LOG_NBLKS, sizeof(lm_log_t *))))
+		return -ENOMEM;
 	for (i = 0; i < TX_LOG_NBLKS; i++) {
-	
 		if (IS_ERR(lg = log_alloc(fd, 
 		    off + (i << TX_LOG_BLK_SHFT), TX_LOG_BLK_SIZE,
 		    NULL))) {
 			free(buf);
+			free(logs);
 	    		return PTR_ERR(lg);
 		}
 #if 0
@@ -605,9 +640,11 @@ int lm_system_init(int fd, loff_t off)
 			}
 		}
 #endif
-		list_add(&lg->list, &active_logs);
+		logs[i] = lg;
 
 	}
+	head = 0;
+	tail = 0;
 	return 0;
 }
 

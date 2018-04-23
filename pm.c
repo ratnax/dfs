@@ -7,6 +7,7 @@ __page_free(pg_mgr_t *pm, struct page *pg)
 {
 	printf("releasing:%ld\n", pg->pgno);
 	pm->exit_mpage(PG2MPG(pg), pg->state == DELETED);
+	assert(list_empty(&pg->mops));
 	if (pg->dp)
 		free(pg->dp); 
 	if (pg->dp_mem)
@@ -105,6 +106,7 @@ __page_init(pg_mgr_t *pm, struct page *pg, uint64_t pgno, uint32_t size)
 	pg->readers = pg->writers = 0;
 	pg->dp_mem = NULL;
 	INIT_HLIST_NODE(&pg->hq);
+	INIT_LIST_HEAD(&pg->mops);
 	if (!(pg->dp = malloc(size)))
 		return (-ENOMEM);
 	return pm->init_mpage(PG2MPG(pg));
@@ -300,7 +302,8 @@ __page_unlock(pg_mgr_t *pm, struct page *pg)
 static int
 __page_write(pg_mgr_t *pm, struct page *pg)
 {
-	void *dp;
+	pg_dop_hdr_t *hdr;
+	struct dpage *dp;
 	ssize_t b;
 	int err;
 
@@ -321,19 +324,22 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	}
 	pthread_mutex_unlock(&pm->lock);
 
-	err = tx_commit_page(pg->pgno, dp, PAGE_SIZE);
+	err = tx_log_page(pg->pgno, dp, PAGE_SIZE);
 	assert(!err);
 
 	printf("Writing:%ld\n", pg->pgno);
 	b = pwrite(db_fd, dp, PAGE_SIZE, pg->pgno << PAGE_SHFT);
 	err = (b == PAGE_SIZE) ? 0 : -EIO;
     
+	err = tx_commit_page(pg, err);
+
 	pthread_mutex_lock(&pm->lock);
 	if (pg->state == WRITING || pg->state == COWED) {
-		if (!err) 
+		if (!err) {
 			pg->state = UPTODATE;
-		else 
+		} else {
 			pg->state = DIRTY;
+		}
 	}
 	if (pg->dp != dp)
 		free(dp);
@@ -460,6 +466,7 @@ static void * syncer(void *arg)
 {
 	pg_mgr_t *pm = (pg_mgr_t *) arg;
 	struct page *pg;
+	struct pgmop *mop;
 
 	pthread_mutex_lock(&pm->lock);
 	while (1) {
@@ -475,7 +482,18 @@ static void * syncer(void *arg)
 		assert(pg->count == 0);
 		assert(pg->size == PAGE_SIZE);
 		assert(pg->state == DIRTY);
+		assert(!list_empty(&pg->mops));
 	    
+		mop = list_first_entry(&pg->mops, struct pgmop, pgops);
+		if (mop->size) {
+			mop = malloc(sizeof(struct pgmop));
+		 	assert(mop);
+			mop->size = 0;
+			list_add_tail(&mop->pgops, &pg->mops);
+		} else {
+			list_del(&mop->pgops);
+			list_add_tail(&mop->pgops, &pg->mops);
+		}
 		list_del(&pg->q);
 		pg->count++;
 
@@ -492,9 +510,14 @@ pm_txn_log_ins(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, void *rec,
 {
 	struct page	*pg = MPG2PG(mp);
 	struct dpage	*dp = pg->dp;
-
-	return txn_log_ins(tx, pg->pgno, dp->lsn, rec, rec_len, ins_idx,
-	    &dp->lsn); 
+	struct pgmop	*mop;
+	int ret; 
+	
+	if ((ret = txn_log_ins(tx, pg->pgno, dp->lsn, rec, rec_len, ins_idx,
+	    &dp->lsn, &mop)) == 0)  {
+		list_add_tail(&mop->pgops, &pg->mops);
+	}
+	return ret;
 }
 
 int
@@ -504,9 +527,14 @@ pm_txn_log_del(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, void *rec,
 {
 	struct page	*pg = MPG2PG(mp);
 	struct dpage	*dp = pg->dp;
-
-	return txn_log_del(tx, pg->pgno, dp->lsn, rec, rec_len, del_idx,
-	    &dp->lsn);
+	struct pgmop	*mop;
+	int ret; 
+	
+	if ((ret = txn_log_del(tx, pg->pgno, dp->lsn, rec, rec_len, del_idx,
+	    &dp->lsn, &mop)) == 0) {
+		list_add_tail(&mop->pgops, &pg->mops);
+	}
+	return ret;
 }
 
 int
@@ -516,9 +544,14 @@ pm_txn_log_rep(pg_mgr_t *pm, struct txn *tx, struct mpage *mp,
 {	
 	struct page	*pg = MPG2PG(mp);
 	struct dpage	*dp = pg->dp;
-
-	return txn_log_rep(tx, pg->pgno, dp->lsn, orec, orec_len, key, key_len,
-	    val, val_len, rep_idx, &dp->lsn);  	
+	struct pgmop	*mop;
+	int ret; 
+	
+	if ((ret = txn_log_rep(tx, pg->pgno, dp->lsn, orec, orec_len, key,
+	    key_len, val, val_len, rep_idx, &dp->lsn, &mop)) == 0) {
+		list_add(&mop->pgops, &pg->mops);
+	}
+	return ret;
 }
 
 int
@@ -534,10 +567,21 @@ pm_txn_log_split(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
 	struct dpage	*ldp = lpg->dp;
 	struct dpage	*rdp = rpg->dp;
 	struct dpage	*pdp = ppg->dp;
+	struct pgmop	*omop;
+	struct pgmop	*lmop;
+	struct pgmop	*rmop;
+	struct pgmop	*pmop;
+	int ret;
 
-	return txn_log_split(tx, ppg->pgno, pdp->lsn, opg->pgno, odp->lsn,
+	if ((ret = txn_log_split(tx, ppg->pgno, pdp->lsn, opg->pgno, odp->lsn,
 	    lpg->pgno, rpg->pgno, ins_idx, spl_idx, &pdp->lsn, &odp->lsn,
-	    &ldp->lsn, &rdp->lsn);
+	    &ldp->lsn, &rdp->lsn, &omop, &lmop, &rmop, &pmop)) == 0) {
+		list_add_tail(&omop->pgops, &opg->mops);
+		list_add_tail(&lmop->pgops, &lpg->mops);
+		list_add_tail(&rmop->pgops, &rpg->mops);
+		list_add_tail(&pmop->pgops, &ppg->mops);
+	}
+	return ret;
 }
 
 int
@@ -555,10 +599,24 @@ pm_txn_log_newroot(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
 	struct dpage	*rdp = rpg->dp;
 	struct dpage	*pdp = ppg->dp;
 	struct dpage	*mddp = mdpg->dp;
+	struct pgmop	*omop;
+	struct pgmop	*lmop;
+	struct pgmop	*rmop;
+	struct pgmop	*pmop;
+	struct pgmop	*mdmop;
+	int ret;
 
-	return txn_log_newroot(tx, ppg->pgno, opg->pgno, odp->lsn,
+	if ((ret = txn_log_newroot(tx, ppg->pgno, opg->pgno, odp->lsn,
 	    lpg->pgno, rpg->pgno, mdpg->pgno, mddp->lsn, ins_idx, spl_idx,
-	    &pdp->lsn, &odp->lsn, &ldp->lsn, &rdp->lsn, &mddp->lsn);
+	    &pdp->lsn, &odp->lsn, &ldp->lsn, &rdp->lsn, &mddp->lsn,
+	    &omop, &lmop, &rmop, &pmop, &mdmop)) == 0) {
+		list_add_tail(&omop->pgops, &opg->mops);
+		list_add_tail(&lmop->pgops, &lpg->mops);
+		list_add_tail(&rmop->pgops, &rpg->mops);
+		list_add_tail(&pmop->pgops, &ppg->mops);
+		list_add_tail(&mdmop->pgops, &mdpg->mops);
+	}
+	return ret;
 }
 
 int
@@ -567,8 +625,14 @@ pm_txn_log_bmop(pg_mgr_t *pm, struct txn *tx, struct mpage *mp, int bu,
 {
 	struct page	*pg = MPG2PG(mp);
 	struct dpage	*dp = pg->dp;
+	struct pgmop	*mop;
+	int ret;
 
-	return txn_log_bmop(tx, pg->pgno, dp->lsn, bu, bit, set, &dp->lsn);
+	if ((ret = txn_log_bmop(tx, pg->pgno, dp->lsn, bu, bit, set, &dp->lsn,
+	    &mop)) == 0) {
+		list_add_tail(&mop->pgops, &pg->mops);
+	}
+	return ret;
 }
 
 pg_mgr_t *

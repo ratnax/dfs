@@ -23,18 +23,20 @@ typedef enum {
 } page_state_t;
 
 struct page {
-	int32_t count;
+	int32_t			count;
 
-	page_state_t state;
-	pthread_mutex_t	iolock;
-	pthread_rwlock_t  lock;
-	int writers;
-	int readers;
+	page_state_t		state;
+	pthread_mutex_t		iolock;
+	pthread_rwlock_t	lock;
+	int			writers;
+	int			readers;
 
-	struct hlist_node hq;		/* hash queue */
-	struct list_head q;		/* lru queue */
+	struct hlist_node	hq;		/* hash queue */
+	struct list_head	q;		/* lru queue */
+	struct list_head	mops;
+	struct pgmop		*mop;
 	
-	void *dp_mem;
+	void			*dp_mem;
 	PAGE_STRUCT_TLR;
 };
 
@@ -51,15 +53,14 @@ struct page_mgr {
 	pthread_t		syncer;
 	int			nlru;
 	int			max_nlru;
-
 #define	HASHSIZE		10240
 #define	HASHKEY(pgno)		(pgno % HASHSIZE)
 	struct hlist_head	hash_table[HASHSIZE];
 
-	init_mpage_t init_mpage;
-	read_mpage_t read_mpage;
-	exit_mpage_t exit_mpage;
-	size_t mp_sz;
-	bool active;
+	init_mpage_t		init_mpage;
+	read_mpage_t		read_mpage;
+	exit_mpage_t		exit_mpage;
+	size_t			mp_sz;
+	bool			active;
 };
 #endif 
