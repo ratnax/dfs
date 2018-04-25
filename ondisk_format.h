@@ -9,7 +9,8 @@
 #define BM_MAP_PGNO	(2)
 
 #define BM_PREMAP_PGS	(2)
-#define BM_POSTMAP_PGS	(1 + (TX_LOG_SPACE >> 12)) /* "1" for tree root page */
+#define BM_POSTMAP_PGS	(1 + (TX_LOG_SPACE >> PAGE_SHFT))
+				/* "1" for tree root page */
 
 #define SB_MAGIC	(*(uint64_t *) "SUPERBLK")
 struct super_block {

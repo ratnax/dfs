@@ -324,14 +324,14 @@ __page_write(pg_mgr_t *pm, struct page *pg)
 	}
 	pthread_mutex_unlock(&pm->lock);
 
-	err = tx_log_page(pg->pgno, dp, PAGE_SIZE);
+	err = txn_log_page(pg, dp, PAGE_SIZE);
 	assert(!err);
 
 	printf("Writing:%ld\n", pg->pgno);
 	b = pwrite(db_fd, dp, PAGE_SIZE, pg->pgno << PAGE_SHFT);
 	err = (b == PAGE_SIZE) ? 0 : -EIO;
     
-	err = tx_commit_page(pg, err);
+	err = txn_commit_page(pg, err);
 
 	pthread_mutex_lock(&pm->lock);
 	if (pg->state == WRITING || pg->state == COWED) {

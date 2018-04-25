@@ -197,7 +197,7 @@ struct mpage *__bt_get_md(void)
 {
 	struct mpage *mp;
 
-	mp = bt_page_get(BT_MDPGNO);
+	mp = bt_page_get(BT_MD_PGNO);
 	if (IS_ERR(mp))
 		return mp;
 	assert(MP_ISMETADATA(mp));
@@ -1014,7 +1014,7 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 		return PTR_ERR(pmp);
 	}
 	if (MP_ISMETADATA(pmp)) {
-		assert(pmp->pgno == BT_MDPGNO);
+		assert(pmp->pgno == BT_MD_PGNO);
 		bt_page_unlock(pmp);
 		new_root = bt_page_new(tx, PAGE_SIZE);
 		if (IS_ERR(new_root)) {
@@ -1204,14 +1204,12 @@ static void *reorganiser(void *arg)
 
 	while (1) {
 		pthread_mutex_lock(&reorg_qlock);
-		mp = NULL;
 		while (1) {
+			mp = NULL;
 			pthread_mutex_lock(&tree_list_lock);
 			list_for_each_entry(t, &tree_list, list) {
 				if (list_empty(&t->reorg_qhead))
 					continue;
-				pthread_mutex_unlock(&tree_list_lock);
-
 		    		mp = list_first_entry(&t->reorg_qhead,
 				    struct mpage, reorg_qentry);
 
@@ -1226,7 +1224,7 @@ static void *reorganiser(void *arg)
 		pthread_mutex_unlock(&reorg_qlock);
 		if (!mp) 
 			break;
-		tx = tx_alloc();
+		tx = txn_alloc();
 		assert(!IS_ERR(tx));
 		
 		err = __bt_reorg(tx, t, mp);
@@ -1234,7 +1232,7 @@ static void *reorganiser(void *arg)
 		bt_page_put(mp);
 		err = txn_commit(tx);
 		assert(!err);
-		txn_free(tx);
+		// txn_free(tx);
 	}
 }
 	
@@ -1251,14 +1249,16 @@ bt_mkfs(int fd, pgno_t root_pgno)
 	dp->flags = DP_LEAF;
 	dp->lower = DP_HDRLEN;
 	dp->upper = PAGE_SIZE;
-	if (PAGE_SIZE != (b = pwrite(fd, dp, PAGE_SIZE, root_pgno << 12))) {
+	if (PAGE_SIZE != (b = pwrite(fd, dp, PAGE_SIZE,
+	    root_pgno << PAGE_SHFT))) {
 		free(dp);
 		return -EIO;
 	}
 
 	dp->flags = DP_METADATA;
 	dp->root_pgno = root_pgno;
-	if (PAGE_SIZE != (b = pwrite(fd, dp, PAGE_SIZE, BT_MD_PGNO << 12))) {
+	if (PAGE_SIZE != (b = pwrite(fd, dp, PAGE_SIZE,
+	    BT_MD_PGNO << PAGE_SHFT))) {
 		free(dp);
 		return -EIO;
 	}
@@ -1272,7 +1272,7 @@ print_subtree(struct mpage *mp, int level)
 	int i;
 	struct dpage *dp = mp->dp;
 
-	assert(bt_page_valid(mp));
+	// assert(bt_page_valid(mp));
 	if (MP_ISINTERNAL(mp)) {
 		for (i = 0; i < DP_NXTINDX(dp); i++) {
 			DINTERNAL *di = GETDINTERNAL(dp, i);

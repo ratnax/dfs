@@ -158,7 +158,6 @@ extern int	txn_log_bmop(struct txn *tx, uint64_t pgno, uint64_t lsn,
 		    struct pgmop **out_mop); 
 extern void	txn_free_op(struct pgmop *mop);
 extern uint64_t txn_get_next_lsn(void);
-extern int	txn_commit_page(uint64_t pgno, void *pg, size_t len);
-extern void	txn_system_exit(void);
-extern int	txn_system_init(void);
+extern int	txn_commit_page(struct page *pg, int err);
+extern int	txn_log_page(struct page *pg, void *data, size_t size);
 #endif

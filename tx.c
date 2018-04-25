@@ -18,12 +18,12 @@ uint64_t txn_get_next_lsn(void)
 	return lsn;
 }
 
-void tx_free(struct txn *tx)
+void txn_free(struct txn *tx)
 {
 	free(tx);
 }
 
-struct txn *tx_alloc(void)
+struct txn *txn_alloc(void)
 {
 	struct txn *tx;
 	static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -487,13 +487,13 @@ __tx_commit(struct txn *tx)
 		free(tx->mop);
 		tx->mop = NULL;
 		assert(list_empty(&tx->mops));
-		tx_free(tx);
+		txn_free(tx);
 	}
 	return ret;
 }
 
 int
-tx_commit(struct txn *tx)
+txn_commit(struct txn *tx)
 {
 	int ret;
 
@@ -551,7 +551,7 @@ __tx_log_page(struct page *pg, void *dp, size_t len)
 				free(tx->mop);
 				tx->mop = NULL;
 				assert(list_empty(&tx->mops));
-				tx_free(tx);
+				txn_free(tx);
 			}
 		} 
 	} while (1);
@@ -559,7 +559,7 @@ __tx_log_page(struct page *pg, void *dp, size_t len)
 }
 
 int
-tx_log_page(struct page *pg, void *dp, size_t len)
+txn_log_page(struct page *pg, void *dp, size_t len)
 {
 	int ret;
 
@@ -569,7 +569,8 @@ tx_log_page(struct page *pg, void *dp, size_t len)
 	return ret;
 }
 
-int tx_commit_page(struct page *pg, int err)
+int
+txn_commit_page(struct page *pg, int err)
 {
 	pthread_mutex_lock(&iolock);
 	log_put(pg->mop->lg);

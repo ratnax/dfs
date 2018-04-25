@@ -1,5 +1,8 @@
 #include "global.h"
 #include "bt_ext.h"
+#include "lm_ext.h"
+#include "bm_ext.h"
+#include "tx_ext.h"
 
 BTREE *t;
 
@@ -91,11 +94,11 @@ inserter(void *arg)
 		vmem[0] = key;
 		v.size = 250; //key % 249 + 1;
 
-		tx = tx_alloc();
+		tx = txn_alloc();
 		assert(!IS_ERR(tx));
 
 		err = bt_put(tx, t, &k, &v); 
-		if (!err) {	
+		if (!err) {
 			assert(!(bitmap[key >> 3] & (1 << (key % 8))));
 			// assert(v.size == key % 249 + 1);
 			__sync_fetch_and_or(&bitmap[key >> 3], 1 << (key % 8));
@@ -104,9 +107,9 @@ inserter(void *arg)
 		} else {
 			fprintf(stderr, "error in insert\n");
 		}
-		err = tx_commit(tx);
+		err = txn_commit(tx);
 		assert(!err);
-		tx_free(tx);
+		// txn_free(tx);
 	}
 	return NULL;
 }
@@ -131,7 +134,7 @@ deleter(void *arg)
 		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][2];
 		kmem[0] = key;
 
-		tx = tx_alloc();
+		tx = txn_alloc();
 		assert(!IS_ERR(tx));
 		err = bt_del(tx, t, &k);
 		if (!err) {
@@ -143,9 +146,9 @@ deleter(void *arg)
 		} else {
 			fprintf(stderr, "error in delete\n");
 		}
-		err = tx_commit(tx);
+		err = txn_commit(tx);
 		assert(!err);
-		tx_free(tx);
+		// txn_free(tx);
 	}
 	return NULL;
 }

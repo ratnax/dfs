@@ -41,7 +41,7 @@ struct sect_dlm {
 #define SECT_TLR_OFFSET		((SECT_SIZE - SECT_DLM_SIZE))
 #define SECT_DATA_SIZE		(SECT_SIZE - 2 * SECT_DLM_SIZE)
 
-#define LOG_MAX_IOV		(256)
+#define LOG_MAX_IOV		(1024)
 
 struct lm_log_t {
 	loff_t	 off;			/* next log offset to write to */

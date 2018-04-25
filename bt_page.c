@@ -5,12 +5,12 @@ static pg_mgr_t *pm;
 
 struct txn *bt_txn_alloc(void)
 {
-	return tx_alloc();
+	return txn_alloc();
 }
 
 void bt_txn_free(struct txn *tx)
 {
-	tx_free(tx);
+	txn_free(tx);
 }
 
 int

@@ -81,6 +81,7 @@ static void
 __log_write(lm_log_t *lg, void *data, size_t size)
 {
 	size_t len;
+	size_t total;
 
 	if ((lg->coff >> SECT_SHFT) == (lg->off >> SECT_SHFT)) {
 		len = __log_sector(lg, data, size);
@@ -129,30 +130,36 @@ log_write(lm_log_t *lg, void *data, size_t size)
 	size_t iov_needed;
 	int ret;
 
-	if (log_space_available(lg) < size)
-		return -ENOSPC;
+	if (log_space_available(lg) < size) { assert(0);
+		return -ENOSPC;}
 	if ((iov_needed = __iov_needed(lg, size)) > __iov_available(lg) &&
 	    (ret = log_commit(lg)))
 		return ret;
-	if (iov_needed > __iov_available(lg))
-		return -ENOSPC;
+	if (iov_needed > __iov_available(lg)) {assert(0);
+		return -ENOSPC;}
 	__log_write(lg, data, size);
 	return 0;
 }
 
+void kkk(void) {}
 lm_log_t *
 lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
 {
 	lm_log_t *lg;
 	int ret;
 
-	while (head != tail) {
+	eprintf("v:%ld\n", size);
+	do {
 		lg = logs[head];
 
 		if (-ENOSPC == (ret = log_writev(lg, iov, iovcnt, size))) {
+			kkk();
 			if ((ret = log_commit(lg)))
 				return ERR_PTR(ret);
-			head++;	
+			if (((head + 1) % TX_LOG_NBLKS) != tail)
+				head = (head + 1) % TX_LOG_NBLKS;
+			else
+				break;
 		} else {
 			if (!ret) {
 				lg->commit_count++;	
@@ -160,7 +167,8 @@ lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
 			}
 			return ERR_PTR(ret);
 		}
-	}
+
+	} while (1);
 	return ERR_PTR(-ENOSPC);
 }
 
@@ -170,13 +178,18 @@ lm_write(void *data, size_t size)
 	lm_log_t *lg;
 	int ret;
 
-    	while (head != tail) {
+	eprintf(":%ld\n", size);
+	do {
 		lg = logs[head];
 
 		if (-ENOSPC == (ret = log_write(lg, data, size))) {
+			kkk();
 			if ((ret = log_commit(lg)))
 				return ERR_PTR(ret);
-			head++;	
+			if (((head + 1) % TX_LOG_NBLKS) != tail)
+				head = (head + 1) % TX_LOG_NBLKS;
+			else
+				break;
 		} else {
 			if (!ret) {
 				lg->commit_count++;	
@@ -184,7 +197,8 @@ lm_write(void *data, size_t size)
 			}
 			return ERR_PTR(ret);
 		}
-	}
+
+	} while (1);
 	return ERR_PTR(-ENOSPC);
 }
 
@@ -201,24 +215,23 @@ log_put(lm_log_t *lg)
 
 	--lg->commit_count;
 	for ( ;tail < head; tail++) {
-		if (logs[tail]->commit_count == 0) {
-			if ((ret = log_finish(lg)))
-				return ret;
-			tail++;
-		}
-		break;
+		if (logs[tail]->commit_count)
+			break;
+		if ((ret = log_finish(lg)))
+			return ret;
 	}
 	return ret;
 }
 
 static int
-__log_flush(lm_log_t *lg, struct iovec *iov, int cnt, loff_t off, size_t size)
+__log_flush(lm_log_t *lg, struct iovec *iov, int cnt, loff_t off, size_t size,
+    bool sync)
 {
 	ssize_t bwrote;
 	size_t len = 0;
 	int i, ret;
 
-	eprintf("Flushing @ %ld %ld\n", off, size);
+	printf("Flushing @ %ld %ld\n", off, size);
 	if (lg->mmaped_addr) {
 		for (i = 0; i < cnt; i++) {
 			memcpy(lg->mmaped_addr + off + len, iov[i].iov_base,
@@ -227,9 +240,11 @@ __log_flush(lm_log_t *lg, struct iovec *iov, int cnt, loff_t off, size_t size)
 		}
 	} else {
 		if ((size != (bwrote = pwritev(lg->fd, iov, cnt,
-		    lg->base_offset + off))))
+		    lg->base_offset + off)))) {
+			assert(0);
 			return -EIO;
-		if ((ret = fsync(lg->fd)))
+			}
+		if (sync && (ret = fsync(lg->fd)))
 			return ret;
 	}
 	return 0;
@@ -323,7 +338,7 @@ __log_commit(lm_log_t *lg)
 	assert(iovidx <= lg->iovmax);
 
 	coff = coff & ~SECT_MASK;
-	return __log_flush(lg, lg->iov, iovidx, coff, off - coff);
+	return __log_flush(lg, lg->iov, iovidx, coff, off - coff, true);
 }
 
 int
@@ -347,12 +362,13 @@ log_commit(lm_log_t *lg)
 		int i;
 		void *sect = lg->sect;
 
-		memcpy(lg->iov, &lg->iov[lg->lsh_iovidx],
+		memmove(lg->iov, &lg->iov[lg->lsh_iovidx],
 		    sizeof (struct iovec) * (lg->iovidx - lg->lsh_iovidx));
 		lg->iovidx = lg->iovidx - lg->lsh_iovidx;
+		lg->lsh_iovidx = 0;
 
 		for (i = 1; i < lg->iovidx; i++) {
-			memcpy(sect, lg->iov[i].iov_base, lg->iov[i].iov_len);
+			memmove(sect, lg->iov[i].iov_base, lg->iov[i].iov_len);
 			lg->iov[i].iov_base = sect;
 			sect += lg->iov[i].iov_len;
 		}
@@ -362,6 +378,7 @@ log_commit(lm_log_t *lg)
 		hdr->mrkr = lg->mrkr;
 		hdr->coff = __encode_coff(lg, SECT_DLM_SIZE);
 
+		lg->lsh_iovidx = 0;
 		lg->iov[0].iov_base = hdr;
 		lg->iov[0].iov_len = SECT_DLM_SIZE;
 		lg->iovidx = 1;
@@ -391,12 +408,16 @@ log_finish(lm_log_t *lg)
 	zero_len = log_space_available(lg);
 	while (zero_len) {
 		if (zero_len < SECT_SIZE) {
-			if ((ret = log_write(lg, lg->zero_sect, zero_len)))
+			if ((ret = log_write(lg, lg->zero_sect, zero_len))){
+				assert(0);
 				return ret;
+			}
 			zero_len = 0;
 		} else {
-			if ((ret = log_write(lg, lg->zero_sect, SECT_SIZE)))
+			if ((ret = log_write(lg, lg->zero_sect, SECT_SIZE))) {
+				assert(0);
 				return ret;
+		}
 			zero_len -= SECT_SIZE;
 		}
 	}
@@ -414,7 +435,7 @@ log_finish(lm_log_t *lg)
 
 	iov.iov_base = lg->zero_sect;
 	iov.iov_len = SECT_SIZE;
-	if (ret = __log_flush(lg, &iov, 1, 0, SECT_SIZE))
+	if (ret = __log_flush(lg, &iov, 1, 0, SECT_SIZE, true))
 		return ret;
 	lg->mrkr = hdr->mrkr;
 	lg->off = lg->coff = 0;
@@ -442,10 +463,10 @@ __log_init(lm_log_t *lg, loff_t start_sect)
 	iov.iov_len = SECT_SIZE;
 	for (i = start_sect; i < (lg->size >> SECT_SHFT); i++) {
 		if ((ret = __log_flush(lg, &iov, 1, i << SECT_SHFT,
-		    SECT_SIZE)))
-			break;
+		    SECT_SIZE, false)))
+			return ret;
 	}
-	return ret;
+	return fsync(lg->fd);
 }
 
 static int 
@@ -515,12 +536,12 @@ log_recover(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
 		if ((len = __recover_sector(lg, lg->sect, i)) < 0) 
 			return len;
 		len -= SECT_DLM_SIZE;
-		memcpy(buf + off, lg->sect + SECT_DLM_SIZE, len);
+		memmove(buf + off, lg->sect + SECT_DLM_SIZE, len);
 		off += len;
 		if ((size - off) < SECT_DATA_SIZE) {
 			if ((ret_len = (*cb)(buf, off, cb_arg)) < 0) 
 				return ret_len;
-			memcpy(buf, buf + ret_len, off - ret_len);
+			memmove(buf, buf + ret_len, off - ret_len);
 			off -= ret_len;
 			total_len += ret_len;
 		}
@@ -626,8 +647,7 @@ int lm_system_init(int fd, loff_t off)
 			free(logs);
 	    		return PTR_ERR(lg);
 		}
-#if 0
-		if ((ret = log_recover(lg, buf, 1024 * 1024, __recover,
+		if ((ret = log_recover(lg, buf, 8192, __recover,
 		    NULL))) {
 			if (ret == -ENXIO) {
 				if ((ret = log_finish(lg))) {
@@ -639,9 +659,7 @@ int lm_system_init(int fd, loff_t off)
 				return ret;
 			}
 		}
-#endif
 		logs[i] = lg;
-
 	}
 	head = 0;
 	tail = 0;

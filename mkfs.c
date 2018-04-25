@@ -21,8 +21,8 @@ int main(int argc, char **argv)
 	sb.bm_map_pgno = BM_MAP_PGNO;
 	if ((sb.bm_map_npgs = bm_mkfs(fd)) < 0)
 		return err;
-	sb.lm_log_off = (BM_MAP_PGNO + sb.bm_map_npgs) << 12; 
-	if ((sb.lm_log_npgs = lm_mkfs(fd, sb.lm_log_off)))
+	sb.lm_log_off = (BM_MAP_PGNO + sb.bm_map_npgs) << PAGE_SHFT; 
+	if ((sb.lm_log_npgs = lm_mkfs(fd, sb.lm_log_off)) <= 0)
 		return err;
 	if ((err = bt_mkfs(fd, sb.bm_map_npgs + sb.lm_log_npgs + BM_MAP_PGNO)))
 		return err;
@@ -30,5 +30,7 @@ int main(int argc, char **argv)
 	if (sizeof(struct super_block) != pwrite(fd, &sb,
 	    sizeof(struct super_block), 0))
 		return -EIO;
+	if ((err = fsync(fd)))
+		return err;
 	return 0;
 }

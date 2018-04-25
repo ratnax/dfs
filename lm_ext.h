@@ -8,6 +8,7 @@ typedef size_t	(*lm_cb_t)(void *buf, size_t size, void *arg);
 extern size_t	 log_space_available(lm_log_t *);
 extern int	 log_write(lm_log_t *, void *, size_t);
 extern int	 log_writev(lm_log_t *, struct iovec *, size_t, size_t);
+extern int	 log_put(lm_log_t *);
 extern lm_log_t	*lm_write(void *, size_t);
 extern lm_log_t	*lm_writev(struct iovec *, size_t, size_t);
 extern int	 lm_commit(void);
