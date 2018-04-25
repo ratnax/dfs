@@ -5,8 +5,32 @@ int db_fd;
 static void
 __page_free(pg_mgr_t *pm, struct page *pg)
 {
-	printf("releasing:%ld\n", pg->pgno);
+	struct pgmop *mop;
+//	eprintf("releasing:%ld\n", pg->pgno);
 	pm->exit_mpage(PG2MPG(pg), pg->state == DELETED);
+	while (!list_empty(&pg->mops)) {
+		mop = list_first_entry(&pg->mops, struct pgmop, pgops);
+		list_del(&mop->pgops);
+		if (mop->size == 0)
+			free(mop);
+		else {
+			assert(pg->state == DELETED);
+			mop->pg_commited = true;
+			if (mop->tx_commited) {
+				struct txn *tx = mop->tx;
+				log_put(mop->lg);
+				free(mop);
+				tx->ncommited++;
+				if (tx->ncommited == tx->ntotal) {
+					log_put(tx->mop->lg);
+					free(tx->mop);
+					tx->mop = NULL;
+					assert(list_empty(&tx->mops));
+					txn_free(tx);
+				}
+			} 
+		}
+	}
 	assert(list_empty(&pg->mops));
 	if (pg->dp)
 		free(pg->dp); 
@@ -333,6 +357,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
     
 	err = txn_commit_page(pg, err);
 
+	eprintf("done writing %ld %d\n", pg->pgno, err);
 	pthread_mutex_lock(&pm->lock);
 	if (pg->state == WRITING || pg->state == COWED) {
 		if (!err) {

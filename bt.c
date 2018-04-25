@@ -1220,6 +1220,8 @@ static void *reorganiser(void *arg)
 			pthread_mutex_unlock(&tree_list_lock);
 			if (!mp && !exito)
 				pthread_cond_wait(&reorg_qcond, &reorg_qlock);
+			else
+				break;
 		}
 		pthread_mutex_unlock(&reorg_qlock);
 		if (!mp) 

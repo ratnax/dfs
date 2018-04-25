@@ -130,13 +130,13 @@ log_write(lm_log_t *lg, void *data, size_t size)
 	size_t iov_needed;
 	int ret;
 
-	if (log_space_available(lg) < size) { assert(0);
-		return -ENOSPC;}
+	if (log_space_available(lg) < size)
+		return -ENOSPC;
 	if ((iov_needed = __iov_needed(lg, size)) > __iov_available(lg) &&
 	    (ret = log_commit(lg)))
 		return ret;
-	if (iov_needed > __iov_available(lg)) {assert(0);
-		return -ENOSPC;}
+	if (iov_needed > __iov_available(lg))
+		return -ENOSPC;
 	__log_write(lg, data, size);
 	return 0;
 }
@@ -148,7 +148,6 @@ lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
 	lm_log_t *lg;
 	int ret;
 
-	eprintf("v:%ld\n", size);
 	do {
 		lg = logs[head];
 
@@ -178,7 +177,6 @@ lm_write(void *data, size_t size)
 	lm_log_t *lg;
 	int ret;
 
-	eprintf(":%ld\n", size);
 	do {
 		lg = logs[head];
 
@@ -614,6 +612,7 @@ log_alloc(int fd, loff_t offset, size_t size, void *addr)
 	lg->psti = lg->pshi = 0;
 	lg->lsh_iovidx = 0;	
 	lg->fst_iovidx = 0;		
+	lg->commit_count = 0;
 	__init_fs_mrkrs(lg);
 	return lg;
 }

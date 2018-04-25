@@ -173,7 +173,7 @@ int
 bt_page_system_init(void)
 {
 	if (IS_ERR(pm = pm_alloc(sizeof (struct mpage), &__init_mpage,
-	    &__read_mpage, &__exit_mpage, 1000)))
+	    &__read_mpage, &__exit_mpage, 100)))
 		return (PTR_ERR(pm));
 	return (0);
 }
