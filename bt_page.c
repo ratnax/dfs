@@ -144,7 +144,7 @@ __init_mpage(struct mpage *mp)
 	return 0;
 }
 
-static void
+static int 
 __read_mpage(struct mpage *mp)
 {
 	return;	

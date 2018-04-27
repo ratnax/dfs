@@ -1026,7 +1026,7 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 		pmp->dp->root_pgno = new_root->pgno;
 		bt_page_mark_dirty(pmp);
 
-		err = bt_txn_log_newroot(tx, new_root, mp, lmp, mp, pmp,
+		err = bt_txn_log_newroot(tx, new_root, mp, lmp, rmp, pmp,
 		    splt_indx); 
 		assert(!err);
 	} else {

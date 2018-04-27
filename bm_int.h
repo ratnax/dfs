@@ -4,6 +4,7 @@
 #include "global.h"
 #include "pm_ext.h"
 #include "bm_ext.h"
+#include "list.h"
 #include "ondisk_format.h"
 
 #define TOTAL_RSRVD_PGS	(BM_PREMAP_PGS + BM_POSTMAP_PGS)
@@ -37,10 +38,17 @@ struct dpage {
 #define	MAX_BUPAGES	((TOTAL_UNITS + DP_NBUNIT - 1) / DP_NBUNIT)
 #define	BLK2BIT(u, b)	(((b) & MAX_UNIT_MASK) >> (u)->shft)
 
+struct locked_dp {
+	int			 count;
+	pgno_t			 pgno;
+	struct hlist_node	 hq;		/* hash queue */
+	struct dpage		*dp;
+};
+
 struct mpage {
 	MPAGE_STRUCT_HDR;
-	struct dpage *lockmap_dp;
-	pthread_mutex_t mutex;
+	struct locked_dp	*ldp;
+	pthread_mutex_t		 mutex;
 };
 
 extern void		 bm_page_mark_dirty(struct mpage *mp);

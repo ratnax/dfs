@@ -14,7 +14,7 @@ __blk_alloc(struct txn *tx, struct mpage *mp, uint64_t unit, uint64_t *map,
 	struct bunit *bu, *lm_bu;
 
 	bm_page_wrlock(mp);
-	lm_dp = mp->lockmap_dp;
+	lm_dp = mp->ldp->dp;
 	dp = mp->dp;
 	lm_bu = &lm_dp->bu[unit % DP_NBUNIT];
 	bu = &dp->bu[unit % DP_NBUNIT];
@@ -106,6 +106,7 @@ bm_blk_locked_free(struct txn *tx, blk_t blk)
 	}
 	bm_txn_log_bmop(tx, mp, bu - dp->bu, bit, false); 
 	bm_page_mark_dirty(mp);
+	mp->ldp->count++;
 	bm_page_unlock(mp);
 	bm_page_put(mp);
 	return (0);
@@ -125,7 +126,7 @@ bm_blk_unlock(blk_t blk)
 	if (IS_ERR(mp))
 		return (PTR_ERR(mp));
 	bm_page_wrlock_nocow(mp);
-	dp = mp->lockmap_dp;
+	dp = mp->ldp->dp;
 	bu = &dp->bu[unit % DP_NBUNIT];
 	bit = BLK2BIT(bu, blk);
 	printf("%ld clearing %ld in %ld:%ld\n",
@@ -141,6 +142,7 @@ bm_blk_unlock(blk_t blk)
 	} else if (bu->nfree == 1) {
 		set_bit(unit, maps[bu->shft - MIN_UNIT_SHFT]);
 	}
+	--mp->ldp->count;
 	bm_page_unlock(mp);
 	bm_page_put(mp);
 	return (0);

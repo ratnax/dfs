@@ -57,23 +57,53 @@ end
 
 define list_pages
 	set $i=0
-	while $i < 102400
-		printf "pgno: %d ", mp_pages[$i].pgno
-		mp_flags mp_pages[$i]	
-		printf " npg: %d count: %d ",mp_pages[$i].npg, mp_pages[$i].count
-		
-		if mp_pages[$i].dp
-			if mp_pages[$i].flags & 0x1 
-				printf "METADATA root_pgno: %d", mp_pages[$i].md.root_pgno
-			else
-				dp_flags mp_pages[$i].dp
-				printf "lower: %d upper: %d", mp_pages[$i].dp.lower, mp_pages[$i].dp.upper
+	set $pm=$arg0
+	set $off1=&(((struct page *)0)->hq)
+	set $off2=&(((struct pgmop *)0)->pgops)
+	while $i < 10240
+		set $first=$pm->hash_table[$i].first
+		while $first
+			set $pg=(struct page *) ((void *)$first - (void *)$off1)
+			printf "\n%p %ld (%d %d)\n",$pg, $pg->pgno, $pg->count,  $pg->state
+
+			set $end=&($pg->mops)
+			set $next=$pg->mops.next
+			while $end != $next
+				set $mop=(struct pgmop *)((void *) $next - (void *)$off2)
+				set $tx=$mop->tx
+				if $tx
+				    printf "%p %d %p %d %d", $mop, ((struct pgop_insert *)$mop->dop)->type, $tx, $tx->ncommited, $tx->ntotal
+				    if $tx->omp
+					printf " dep: %p,%ld", $tx->omp, $tx->omp->pgno
+				    end 
+				    printf "\n"
+				end
+				set $next=$next->next
 			end
+
+
+			set $first=$pg->hq.next
 		end
-		printf "\n"
 		set $i=$i+1
 	end
 end
+
+#		printf "pgno: %d ", mp_pages[$i].pgno
+#		mp_flags mp_pages[$i]	
+#		printf " npg: %d count: %d ",mp_pages[$i].npg, mp_pages[$i].count
+		
+#		if mp_pages[$i].dp
+#			if mp_pages[$i].flags & 0x1 
+#				printf "METADATA root_pgno: %d", mp_pages[$i].md.root_pgno
+#			else
+#				dp_flags mp_pages[$i].dp
+#				printf "lower: %d upper: %d", mp_pages[$i].dp.lower, mp_pages[$i].dp.upper
+#			end
+#		end
+#		printf "\n"
+#		set $i=$i+1
+#	end
+#end
 
 define list_rec
 	set $mp=$arg0

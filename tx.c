@@ -7,7 +7,7 @@ static uint64_t txn_next_lsn;
 static struct list_head full_logs;
 static struct list_head active_logs;
 
-static int kk, kkk, kkkk;
+static int kk, kkk1, kkkk;
 static pthread_mutex_t _mutex = PTHREAD_MUTEX_INITIALIZER;
 uint64_t txn_get_next_lsn(void)
 {
@@ -25,7 +25,7 @@ void txn_free(struct txn *tx)
 {
 	free(tx);
 	pthread_mutex_lock(&_mutex);
-	kkk++;
+	kkk1++;
 	pthread_mutex_unlock(&_mutex);
 
 }
@@ -44,6 +44,8 @@ struct txn *txn_alloc(void)
 	INIT_LIST_HEAD(&tx->mops);
 	tx->ncommited = 0;
 	tx->ntotal = 0;
+	tx->omp = NULL;
+	tx->pm = NULL;
 
 	pthread_mutex_lock(&_mutex);
 	kk++;
@@ -161,6 +163,7 @@ txn_log_rep(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	return 0;
 }
 
+#if 0
 static int
 __txn_log_split_old(struct txn *tx, uint64_t ppgno, uint64_t plsn,
     uint64_t opgno, uint64_t olsn, uint64_t lpgno, uint64_t rpgno, int idx,
@@ -198,6 +201,7 @@ __txn_log_split_old(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
+#endif
 
 static int
 __txn_log_split_left(struct txn *tx, uint64_t ppgno, uint64_t plsn,
@@ -326,10 +330,12 @@ txn_log_split(struct txn *tx, uint64_t ppgno, uint64_t plsn, uint64_t opgno,
 {
 	int ret;
 
+#if 0
 	if ((ret = __txn_log_split_old(tx, ppgno, plsn, opgno, olsn, lpgno,
 	    rpgno, ins_idx, spl_idx, out_olsn, out_plsn, out_llsn, out_rlsn,
 	    out_omop, out_lmop, out_rmop, out_pmop))) 
 		return ret;
+#endif
 	if ((ret = __txn_log_split_left(tx, ppgno, plsn, opgno, olsn, lpgno,
 	    rpgno, ins_idx, spl_idx, out_olsn, out_plsn, out_llsn, out_rlsn,
 	    out_omop, out_lmop, out_rmop, out_pmop))) 
@@ -357,10 +363,12 @@ txn_log_newroot(struct txn *tx, uint64_t ppgno, uint64_t opgno, uint64_t olsn,
 	struct pgop_split_md *dop;
 	int ret;
 
+#if 0
 	if ((ret = __txn_log_split_old(tx, ppgno, 0, opgno, olsn, lpgno,
 	    rpgno, ins_idx, spl_idx, out_olsn, out_plsn, out_llsn, out_rlsn,
 	    out_omop, out_lmop, out_rmop, out_pmop))) 
 		return ret;
+#endif
 	if ((ret = __txn_log_split_left(tx, ppgno, 0, opgno, olsn, lpgno,
 	    rpgno, ins_idx, spl_idx, out_olsn, out_plsn, out_llsn, out_rlsn,
 	    out_omop, out_lmop, out_rmop, out_pmop))) 
@@ -516,6 +524,8 @@ __tx_commit(struct txn *tx)
 		free(tx->mop);
 		tx->mop = NULL;
 		assert(list_empty(&tx->mops));
+		if (tx->omp)
+			pm_page_put(tx->pm, tx->omp);
 		txn_free(tx);
 	}
 	return ret;
@@ -582,6 +592,8 @@ __tx_log_page(struct page *pg, void *dp, size_t len)
 				log_put(tx->mop->lg);
 				free(tx->mop);
 				tx->mop = NULL;
+				if (tx->omp)
+					pm_page_put(tx->pm, tx->omp);
 				assert(list_empty(&tx->mops));
 				txn_free(tx);
 			}

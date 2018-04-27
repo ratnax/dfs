@@ -7,7 +7,7 @@
 BTREE *t;
 
 #define MAX_ELE     (1000)
-#define MAX_THREAD  (8)
+#define MAX_THREAD  (4)
 
 #define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
 

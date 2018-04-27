@@ -6,8 +6,8 @@ static void
 __page_free(pg_mgr_t *pm, struct page *pg)
 {
 	struct pgmop *mop;
-//	eprintf("releasing:%ld\n", pg->pgno);
-	pm->exit_mpage(PG2MPG(pg), pg->state == DELETED);
+	eprintf("releasing:%ld %s\n", pg->pgno, pg->state == DELETED ?
+		"yes":"no");
 	while (!list_empty(&pg->mops)) {
 		mop = list_first_entry(&pg->mops, struct pgmop, pgops);
 		list_del(&mop->pgops);
@@ -25,6 +25,8 @@ __page_free(pg_mgr_t *pm, struct page *pg)
 					log_put(tx->mop->lg);
 					free(tx->mop);
 					tx->mop = NULL;
+					if (tx->omp) 
+						pm_page_put(tx->pm, tx->omp);
 					assert(list_empty(&tx->mops));
 					txn_free(tx);
 				}
@@ -32,6 +34,7 @@ __page_free(pg_mgr_t *pm, struct page *pg)
 		}
 	}
 	assert(list_empty(&pg->mops));
+	pm->exit_mpage(PG2MPG(pg), pg->state == DELETED);
 	if (pg->dp)
 		free(pg->dp); 
 	if (pg->dp_mem)
@@ -42,6 +45,8 @@ __page_free(pg_mgr_t *pm, struct page *pg)
 static void
 __insert_locked_htab(pg_mgr_t *pm, struct page *pg)
 {
+	if (HASHKEY(pg->pgno) == 5464)
+		eprintf("kpgno:%ld\n", pg->pgno);
 	hlist_add_head(&pg->hq, &pm->hash_table[HASHKEY(pg->pgno)]);
 }
 
@@ -107,6 +112,7 @@ __lookup_htab(pg_mgr_t *pm, pgno_t pgno)
 static void
 __delete_locked_htab(pg_mgr_t *pm, struct page *pg)
 {
+	eprintf("dpgno:%ld\n", pg->pgno);
 	hlist_del(&pg->hq);
 }
 
@@ -507,7 +513,6 @@ static void * syncer(void *arg)
 		assert(pg->count == 0);
 		assert(pg->size == PAGE_SIZE);
 		assert(pg->state == DIRTY);
-		assert(!list_empty(&pg->mops));
 	    
 		mop = list_first_entry(&pg->mops, struct pgmop, pgops);
 		if (mop->size) {
@@ -601,10 +606,16 @@ pm_txn_log_split(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
 	if ((ret = txn_log_split(tx, ppg->pgno, pdp->lsn, opg->pgno, odp->lsn,
 	    lpg->pgno, rpg->pgno, ins_idx, spl_idx, &pdp->lsn, &odp->lsn,
 	    &ldp->lsn, &rdp->lsn, &omop, &lmop, &rmop, &pmop)) == 0) {
-		list_add_tail(&omop->pgops, &opg->mops);
+//		list_add_tail(&omop->pgops, &opg->mops);
 		list_add_tail(&lmop->pgops, &lpg->mops);
 		list_add_tail(&rmop->pgops, &rpg->mops);
 		list_add_tail(&pmop->pgops, &ppg->mops);
+
+		pthread_mutex_lock(&pm->lock);
+		opg->count++;
+		pthread_mutex_unlock(&pm->lock);
+		tx->omp = omp;
+		tx->pm = pm;
 	}
 	return ret;
 }
@@ -635,11 +646,17 @@ pm_txn_log_newroot(pg_mgr_t *pm, struct txn *tx, struct mpage *pmp,
 	    lpg->pgno, rpg->pgno, mdpg->pgno, mddp->lsn, ins_idx, spl_idx,
 	    &pdp->lsn, &odp->lsn, &ldp->lsn, &rdp->lsn, &mddp->lsn,
 	    &omop, &lmop, &rmop, &pmop, &mdmop)) == 0) {
-		list_add_tail(&omop->pgops, &opg->mops);
+//		list_add_tail(&omop->pgops, &opg->mops);
 		list_add_tail(&lmop->pgops, &lpg->mops);
 		list_add_tail(&rmop->pgops, &rpg->mops);
 		list_add_tail(&pmop->pgops, &ppg->mops);
 		list_add_tail(&mdmop->pgops, &mdpg->mops);
+
+		pthread_mutex_lock(&pm->lock);
+		opg->count++;
+		pthread_mutex_unlock(&pm->lock);
+		tx->omp = omp;
+		tx->pm = pm;
 	}
 	return ret;
 }

@@ -127,6 +127,8 @@ struct txn {
 	struct pgmop		*mop;
 	int			 ncommited;
 	int			 ntotal;
+	struct mpage		*omp;
+	pg_mgr_t		*pm;
 };
 
 extern int	txn_log_ins(struct txn *tx, uint64_t pgno, uint64_t lsn,
