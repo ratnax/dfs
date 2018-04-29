@@ -38,14 +38,14 @@ struct pgop_insert {
 	uint16_t rec_len;
 	uint16_t ins_idx;
 	uint8_t bytes[0];
-};
+} __attribute__((packed));
 
 struct pgop_delete {
 	PG_DOP_HDR;
 	uint16_t rec_len;
 	uint16_t del_idx;
 	uint8_t bytes[0];
-};
+} __attribute__((packed));
 
 struct pgop_replace {
 	PG_DOP_HDR;
@@ -54,28 +54,28 @@ struct pgop_replace {
 	uint16_t rec_len;
 	uint16_t rep_idx;
 	uint8_t bytes[0];
-};
+} __attribute__((packed));
 
 struct pgop_split_old {
 	PG_DOP_HDR;
 	uint64_t lpgno;
 	uint64_t rpgno;
 	uint16_t spl_idx;
-};
+} __attribute__((packed));
 
 struct pgop_split_left {
 	PG_DOP_HDR;
 	uint64_t olsn;
 	uint64_t opgno;
 	uint16_t spl_idx;
-};
+} __attribute__((packed));
 
 struct pgop_split_right {
 	PG_DOP_HDR;
 	uint64_t olsn;
 	uint64_t opgno;
 	uint16_t spl_idx;
-};
+} __attribute__((packed));
 
 struct pgop_split_parent {
 	PG_DOP_HDR;
@@ -85,19 +85,19 @@ struct pgop_split_parent {
 	uint64_t opgno;
 	uint64_t lpgno;
 	uint64_t rpgno;
-};
+} __attribute__((packed));
 
 struct pgop_split_md {
 	PG_DOP_HDR;
 	uint64_t opgno;
 	uint64_t npgno;
-};
+} __attribute__((packed));
 
 struct pgop_blkop {
 	PG_DOP_HDR;
 	uint16_t bu;
 	uint16_t bit;
-};
+} __attribute__((packed));
 
 struct pgmop {
 	lm_log_t		*lg;
@@ -118,8 +118,8 @@ struct tx_commit_rec {
 	union {
 		uint64_t txid:56;
 		uint64_t pgno:56;
-	};
-};
+	} __attribute__((packed));
+} __attribute__((packed));
 
 struct txn {
 	uint64_t		 id;
@@ -161,5 +161,6 @@ extern int	txn_log_bmop(struct txn *tx, uint64_t pgno, uint64_t lsn,
 extern void	txn_free_op(struct pgmop *mop);
 extern uint64_t txn_get_next_lsn(void);
 extern int	txn_commit_page(struct page *pg, int err);
+extern int	txn_commit_page_deleted(struct page *pg);
 extern int	txn_log_page(struct page *pg, void *data, size_t size);
 #endif

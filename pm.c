@@ -6,33 +6,10 @@ static void
 __page_free(pg_mgr_t *pm, struct page *pg)
 {
 	struct pgmop *mop;
-	eprintf("releasing:%ld %s\n", pg->pgno, pg->state == DELETED ?
+	printf("releasing:%ld %s\n", pg->pgno, pg->state == DELETED ?
 		"yes":"no");
-	while (!list_empty(&pg->mops)) {
-		mop = list_first_entry(&pg->mops, struct pgmop, pgops);
-		list_del(&mop->pgops);
-		if (mop->size == 0)
-			free(mop);
-		else {
-			assert(pg->state == DELETED);
-			mop->pg_commited = true;
-			if (mop->tx_commited) {
-				struct txn *tx = mop->tx;
-				log_put(mop->lg);
-				free(mop);
-				tx->ncommited++;
-				if (tx->ncommited == tx->ntotal) {
-					log_put(tx->mop->lg);
-					free(tx->mop);
-					tx->mop = NULL;
-					if (tx->omp) 
-						pm_page_put(tx->pm, tx->omp);
-					assert(list_empty(&tx->mops));
-					txn_free(tx);
-				}
-			} 
-		}
-	}
+
+	txn_commit_page_deleted(pg);
 	assert(list_empty(&pg->mops));
 	pm->exit_mpage(PG2MPG(pg), pg->state == DELETED);
 	if (pg->dp)
@@ -45,8 +22,6 @@ __page_free(pg_mgr_t *pm, struct page *pg)
 static void
 __insert_locked_htab(pg_mgr_t *pm, struct page *pg)
 {
-	if (HASHKEY(pg->pgno) == 5464)
-		eprintf("kpgno:%ld\n", pg->pgno);
 	hlist_add_head(&pg->hq, &pm->hash_table[HASHKEY(pg->pgno)]);
 }
 
@@ -112,7 +87,6 @@ __lookup_htab(pg_mgr_t *pm, pgno_t pgno)
 static void
 __delete_locked_htab(pg_mgr_t *pm, struct page *pg)
 {
-	eprintf("dpgno:%ld\n", pg->pgno);
 	hlist_del(&pg->hq);
 }
 
@@ -363,7 +337,7 @@ __page_write(pg_mgr_t *pm, struct page *pg)
     
 	err = txn_commit_page(pg, err);
 
-	eprintf("done writing %ld %d\n", pg->pgno, err);
+	printf("done writing %ld %d\n", pg->pgno, err);
 	pthread_mutex_lock(&pm->lock);
 	if (pg->state == WRITING || pg->state == COWED) {
 		if (!err) {

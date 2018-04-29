@@ -18,6 +18,8 @@ extern int	 log_recover(lm_log_t *, void *, size_t, lm_cb_t, void *);
 extern void	 log_free(lm_log_t *);
 extern lm_log_t	*log_alloc(int, loff_t, size_t, void *);
 extern long	 lm_mkfs(int, loff_t);
+extern bool	 lm_isfull(void);
+extern int	 lm_scan(lm_cb_t, void *);
 extern void	 lm_system_exit(void);
 extern int	 lm_system_init(int, loff_t);
 #endif

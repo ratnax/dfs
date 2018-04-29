@@ -6,8 +6,8 @@
 
 BTREE *t;
 
-#define MAX_ELE     (1000)
-#define MAX_THREAD  (4)
+#define MAX_ELE     (1000000)
+#define MAX_THREAD  (8)
 
 #define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
 
@@ -107,7 +107,7 @@ inserter(void *arg)
 		} else {
 			fprintf(stderr, "error in insert\n");
 		}
-		err = txn_commit(tx);
+		err = txn_commit(tx, false);
 		assert(!err);
 		// txn_free(tx);
 	}
@@ -146,7 +146,7 @@ deleter(void *arg)
 		} else {
 			fprintf(stderr, "error in delete\n");
 		}
-		err = txn_commit(tx);
+		err = txn_commit(tx, false);
 		assert(!err);
 		// txn_free(tx);
 	}
@@ -219,6 +219,8 @@ int main(int argc, char **argv)
 
 	if ((err = lm_system_init(fd, sb.lm_log_off)))
 		return err;
+	if ((err = rm_system_init(fd)))
+		return err;
 	if ((err = tx_system_init(fd)))
 		return err;
 	if ((err = pm_system_init(fd)))
@@ -235,6 +237,7 @@ int main(int argc, char **argv)
 	bm_system_exit();
 	pm_system_exit();
 	tx_system_exit();
+	rm_system_exit();
 	lm_system_exit();
 	return 0;
 }

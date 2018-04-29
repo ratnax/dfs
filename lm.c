@@ -141,6 +141,14 @@ log_write(lm_log_t *lg, void *data, size_t size)
 	return 0;
 }
 
+bool lm_isfull(void)
+{
+	if (head < tail) 
+		return (tail - head) < 10; //(TX_LOG_NBLKS / 2);
+	else
+		return (head - tail) > 10; //(TX_LOG_NBLKS / 2);
+}
+
 void kkk(void) {}
 lm_log_t *
 lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
@@ -212,12 +220,15 @@ log_put(lm_log_t *lg)
 	int ret = 0;
 
 	--lg->commit_count;
-	for ( ;tail < head; tail++) {
+	do {
 		if (logs[tail]->commit_count)
 			break;
-		if ((ret = log_finish(lg)))
+		if ((ret = log_finish(logs[tail])))
 			return ret;
-	}
+		if (tail == head) 
+			break;
+		tail = (tail + 1) % TX_LOG_NBLKS; 
+	} while (1);
 	return ret;
 }
 
@@ -470,7 +481,7 @@ __log_init(lm_log_t *lg, loff_t start_sect)
 static int 
 __recover_mrkr(lm_log_t *lg, struct sect_dlm *hdr, struct sect_dlm *tlr)
 {
-	eprintf("in:%2x\n", hdr->mrkr);
+	printf("in:%2x\n", hdr->mrkr);
 	switch (hdr->mrkr) {
 	case LOG_MRKR_INIT:
 	case LOG_MRKR_PSWITCH(LOG_MRKR_INIT):
@@ -494,7 +505,7 @@ __recover_mrkr(lm_log_t *lg, struct sect_dlm *hdr, struct sect_dlm *tlr)
 			return -ENXIO;
 		}
 	}
-	eprintf("out:%2x\n", lg->mrkr);
+	printf("out:%2x\n", lg->mrkr);
 	__init_fs_mrkrs(lg);
 	return 0;
 }
@@ -620,36 +631,23 @@ log_alloc(int fd, loff_t offset, size_t size, void *addr)
 static size_t
 __recover(void *data, size_t size, void *arg)
 {
-	eprintf("hai %ld\n", size);
+	printf("hai %ld\n", size);
 	return size;
 }
 
-void lm_system_exit()
+int
+lm_scan(lm_rcb_t rcb, void *arg)
 {
-}
-
-int lm_system_init(int fd, loff_t off)
-{
-	lm_log_t *lg;
-	void *buf;
 	int i, ret;
+	void *buf;
 
 	if (!(buf = malloc(8192)))
 		return -ENOMEM;
-	if (!(logs = calloc(TX_LOG_NBLKS, sizeof(lm_log_t *))))
-		return -ENOMEM;
 	for (i = 0; i < TX_LOG_NBLKS; i++) {
-		if (IS_ERR(lg = log_alloc(fd, 
-		    off + (i << TX_LOG_BLK_SHFT), TX_LOG_BLK_SIZE,
-		    NULL))) {
-			free(buf);
-			free(logs);
-	    		return PTR_ERR(lg);
-		}
-		if ((ret = log_recover(lg, buf, 8192, __recover,
-		    NULL))) {
+		eprintf("recovering log %d\n", i);
+		if ((ret = log_recover(logs[i], buf, 8192, rcb, arg))) {
 			if (ret == -ENXIO) {
-				if ((ret = log_finish(lg))) {
+				if ((ret = log_finish(logs[i]))) {
 					free(buf);
 					return ret;
 				}
@@ -657,6 +655,31 @@ int lm_system_init(int fd, loff_t off)
 				free(buf);
 				return ret;
 			}
+		}
+	}
+	free(buf);
+	return 0;
+}
+
+void lm_system_exit()
+{
+	assert(head == tail);
+	assert(logs[head]->commit_count == 0);
+}
+
+int lm_system_init(int fd, loff_t off)
+{
+	lm_log_t *lg;
+	int i, ret;
+
+	if (!(logs = calloc(TX_LOG_NBLKS, sizeof(lm_log_t *))))
+		return -ENOMEM;
+	for (i = 0; i < TX_LOG_NBLKS; i++) {
+		if (IS_ERR(lg = log_alloc(fd, 
+		    off + (i << TX_LOG_BLK_SHFT), TX_LOG_BLK_SIZE,
+		    NULL))) {
+			free(logs);
+	    		return PTR_ERR(lg);
 		}
 		logs[i] = lg;
 	}
@@ -687,7 +710,7 @@ lm_mkfs(int fd, loff_t off)
 static size_t
 __log_recover(void *data, size_t size, void *arg)
 {
-	eprintf("hai %ld\n", size);
+	printf("hai %ld\n", size);
 	return size;
 }
 

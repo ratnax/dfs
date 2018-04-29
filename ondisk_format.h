@@ -2,7 +2,7 @@
 #define __ONDISK_FORMAT_H__
 
 #define TOTAL_SPACE	(1024 * 1024 * 1024)
-#define TX_LOG_SPACE	(32 * 1024 * 1024)
+#define TX_LOG_SPACE	(128 * 1024 * 1024)
 
 #define SB_PGNO		(0)
 #define BT_MD_PGNO	(1)

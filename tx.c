@@ -1,4 +1,5 @@
 #include "tx_int.h"
+#include "rm_ext.h"
 
 static pthread_mutex_t list_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct list_head gbl_ops; 
@@ -59,9 +60,11 @@ txn_log_ins(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 {
 	struct pgmop *mop;
 	struct pgop_insert *dop;
+	size_t dop_size = sizeof (struct pgop_insert) + rec_len;
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_insert) + rec_len)))
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_insert *) mop->dop;
@@ -73,7 +76,7 @@ txn_log_ins(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	dop->ins_idx = ins_idx;
 	dop->rec_len = rec_len;
 	memcpy(dop->bytes, rec, rec_len);
-	mop->size = sizeof (struct pgop_insert) + rec_len;
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -82,8 +85,8 @@ txn_log_ins(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	*out_lsn = dop->lsn;
 	*out_mop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -94,9 +97,11 @@ txn_log_del(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 {
 	struct pgmop *mop;
 	struct pgop_delete *dop;
+	size_t dop_size = sizeof (struct pgop_delete) + rec_len;
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_delete) + rec_len)))
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_delete *) mop->dop;
@@ -108,7 +113,7 @@ txn_log_del(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	dop->del_idx = del_idx;
 	dop->rec_len = rec_len;
 	memcpy(dop->bytes, rec, rec_len);
-	mop->size = sizeof (struct pgop_delete) + rec_len;
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -117,8 +122,8 @@ txn_log_del(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	*out_lsn = dop->lsn;
 	*out_mop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->txops, &tx->mops);
-	list_add(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -130,9 +135,12 @@ txn_log_rep(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 {
 	struct pgmop *mop;
 	struct pgop_replace *dop;
-
-	if (!(mop = malloc(sizeof (struct pgmop) + 
-	    sizeof (struct pgop_replace) + rec_len + key_len + val_len)))
+	size_t dop_size;
+	
+	dop_size = sizeof (struct pgop_replace) + rec_len + key_len + val_len;
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_replace *) mop->dop;
@@ -148,7 +156,7 @@ txn_log_rep(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	memcpy(dop->bytes, rec, rec_len);
 	memcpy((void *) (dop->bytes) + rec_len, key, key_len);
 	memcpy((void *) (dop->bytes) + rec_len + key_len, val, val_len);
-	mop->size = sizeof (struct pgop_replace) + rec_len + key_len + val_len;
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -157,8 +165,8 @@ txn_log_rep(struct txn *tx, uint64_t pgno, uint64_t lsn, void *rec,
 	*out_lsn = dop->lsn;
 	*out_mop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -196,8 +204,8 @@ __txn_log_split_old(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	*out_olsn = dop->lsn;
 	*out_omop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -212,9 +220,11 @@ __txn_log_split_left(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 {
 	struct pgmop *mop;
 	struct pgop_split_left *dop;
+	size_t dop_size = sizeof (struct pgop_split_left);
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_split_left))))
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_split_left *) mop->dop;
@@ -226,7 +236,7 @@ __txn_log_split_left(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	dop->spl_idx = spl_idx;
 	dop->olsn = olsn;
 	dop->opgno = opgno;
-	mop->size = sizeof (struct pgop_split_left);
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -235,8 +245,8 @@ __txn_log_split_left(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	*out_llsn = dop->lsn;
 	*out_lmop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -250,9 +260,11 @@ __txn_log_split_right(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 {
 	struct pgmop *mop;
 	struct pgop_split_right *dop;
+	size_t dop_size = sizeof (struct pgop_split_right);
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_split_right))))
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_split_right *) mop->dop;
@@ -264,7 +276,7 @@ __txn_log_split_right(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	dop->spl_idx = spl_idx;
 	dop->olsn = olsn;
 	dop->opgno = opgno;
-	mop->size = sizeof (struct pgop_split_right);
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -273,8 +285,8 @@ __txn_log_split_right(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	*out_rlsn = dop->lsn;
 	*out_rmop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -288,9 +300,11 @@ __txn_log_split_parent(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 {
 	struct pgmop *mop;
 	struct pgop_split_parent *dop;
+	size_t dop_size = sizeof (struct pgop_split_parent);
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_split_parent))))
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_split_parent *) mop->dop; 
@@ -305,7 +319,7 @@ __txn_log_split_parent(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	dop->opgno = opgno;
 	dop->lpgno = lpgno;
 	dop->rpgno = rpgno;
-	mop->size = sizeof (struct pgop_split_parent);
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -314,8 +328,8 @@ __txn_log_split_parent(struct txn *tx, uint64_t ppgno, uint64_t plsn,
 	*out_plsn = dop->lsn;
 	*out_pmop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 
 	return 0;
@@ -361,6 +375,7 @@ txn_log_newroot(struct txn *tx, uint64_t ppgno, uint64_t opgno, uint64_t olsn,
 {
 	struct pgmop *mop;
 	struct pgop_split_md *dop;
+	size_t dop_size;
 	int ret;
 
 #if 0
@@ -382,8 +397,11 @@ txn_log_newroot(struct txn *tx, uint64_t ppgno, uint64_t opgno, uint64_t olsn,
 	    out_omop, out_lmop, out_rmop, out_pmop))) 
 		return ret;
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_split_md))))
+
+	dop_size = sizeof (struct pgop_split_md);
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_split_md *) mop->dop; 
@@ -394,7 +412,7 @@ txn_log_newroot(struct txn *tx, uint64_t ppgno, uint64_t opgno, uint64_t olsn,
 	dop->type = PGOP_SPLIT_MD;
 	dop->opgno = opgno;
 	dop->npgno = ppgno;
-	mop->size = sizeof (struct pgop_split_parent);
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -403,8 +421,8 @@ txn_log_newroot(struct txn *tx, uint64_t ppgno, uint64_t opgno, uint64_t olsn,
 	*out_mdlsn = dop->lsn;
 	*out_mdmop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -415,9 +433,11 @@ txn_log_bmop(struct txn *tx, uint64_t pgno, uint64_t lsn, int bu, int bit,
 {
 	struct pgmop *mop;
 	struct pgop_blkop *dop;
+	size_t dop_size = sizeof (struct pgop_blkop);
 
-	if (!(mop = malloc(sizeof (struct pgmop) +
-	    sizeof (struct pgop_blkop))))
+	if ((dop_size % 2))
+		dop_size++;
+	if (!(mop = malloc(sizeof (struct pgmop) + dop_size)))
 		return -ENOMEM;
 
 	dop = (struct pgop_blkop *) mop->dop;
@@ -428,7 +448,7 @@ txn_log_bmop(struct txn *tx, uint64_t pgno, uint64_t lsn, int bu, int bit,
 	dop->type = set ? PGOP_BLKSET : PGOP_BLKRESET;
 	dop->bu = bu;
 	dop->bit = bit;
-	mop->size = sizeof (struct pgop_blkop);
+	mop->size = dop_size;
 	mop->tx = tx;
 	mop->pg = NULL;
 	mop->tx_commited = mop->pg_commited = false;
@@ -437,8 +457,8 @@ txn_log_bmop(struct txn *tx, uint64_t pgno, uint64_t lsn, int bu, int bit,
 	*out_lsn = dop->lsn;
 	*out_mop = mop;
 	pthread_mutex_lock(&list_lock);
-	list_add(&mop->lgops, &gbl_ops);
-	list_add(&mop->txops, &tx->mops);
+	list_add_tail(&mop->lgops, &gbl_ops);
+	list_add_tail(&mop->txops, &tx->mops);
 	pthread_mutex_unlock(&list_lock);
 	return 0;
 }
@@ -504,6 +524,8 @@ __tx_commit(struct txn *tx)
 
 	cr->type = PGOP_COMMIT_TXN;
 	cr->txid = tx->id;
+
+	assert((sizeof(struct tx_commit_rec) % 2) == 0);
 	if (IS_ERR(lg = lm_write(cr, sizeof(struct tx_commit_rec))))
 		return PTR_ERR(lg);
 	if ((ret = lm_commit()))
@@ -524,21 +546,27 @@ __tx_commit(struct txn *tx)
 		free(tx->mop);
 		tx->mop = NULL;
 		assert(list_empty(&tx->mops));
+		pthread_mutex_unlock(&iolock);
 		if (tx->omp)
 			pm_page_put(tx->pm, tx->omp);
+		pthread_mutex_lock(&iolock);
 		txn_free(tx);
 	}
 	return ret;
 }
 
 int
-txn_commit(struct txn *tx)
+txn_commit(struct txn *tx, bool sys)
 {
 	int ret;
 
 	pthread_mutex_lock(&iolock);
 	ret = __tx_commit(tx);
 	pthread_mutex_unlock(&iolock);
+	
+//	while (!sys && lm_isfull())
+//		usleep(1);
+
 	pthread_mutex_lock(&_mutex);
 	kkkk++;
 	pthread_mutex_unlock(&_mutex);
@@ -565,12 +593,13 @@ __tx_log_page(struct page *pg, void *dp, size_t len)
 	cr->type = PGOP_COMMIT_PAGE;
 	cr->pgno = pg->pgno;
 
-	iov[0].iov_base = &cr;
+	iov[0].iov_base = cr;
 	iov[0].iov_len = sizeof (struct tx_commit_rec);
 
 	iov[1].iov_base = dp;
 	iov[1].iov_len = len;
 
+	assert(((len + sizeof(struct tx_commit_rec)) % 2) == 0);
 	if (IS_ERR(lg = lm_writev(iov, 2, len + sizeof(struct tx_commit_rec))))
 		return PTR_ERR(lg);
 	mop->lg = lg;
@@ -592,8 +621,10 @@ __tx_log_page(struct page *pg, void *dp, size_t len)
 				log_put(tx->mop->lg);
 				free(tx->mop);
 				tx->mop = NULL;
+				pthread_mutex_unlock(&iolock);
 				if (tx->omp)
 					pm_page_put(tx->pm, tx->omp);
+				pthread_mutex_lock(&iolock);
 				assert(list_empty(&tx->mops));
 				txn_free(tx);
 			}
@@ -624,6 +655,42 @@ txn_commit_page(struct page *pg, int err)
 	return err;
 }
 
+int
+txn_commit_page_deleted(struct page *pg)
+{
+	struct pgmop *mop;
+
+	pthread_mutex_lock(&iolock);
+	while (!list_empty(&pg->mops)) {
+		mop = list_first_entry(&pg->mops, struct pgmop, pgops);
+		list_del(&mop->pgops);
+		if (mop->size == 0)
+			free(mop);
+		else {
+			assert(pg->state == DELETED);
+			mop->pg_commited = true;
+			if (mop->tx_commited) {
+				struct txn *tx = mop->tx;
+				log_put(mop->lg);
+				free(mop);
+				tx->ncommited++;
+				if (tx->ncommited == tx->ntotal) {
+					log_put(tx->mop->lg);
+					free(tx->mop);
+					tx->mop = NULL;
+					pthread_mutex_unlock(&iolock);
+					if (tx->omp) 
+						pm_page_put(tx->pm, tx->omp);
+					pthread_mutex_lock(&iolock);
+					assert(list_empty(&tx->mops));
+					txn_free(tx);
+				}
+			} 
+		}
+	}
+	pthread_mutex_unlock(&iolock);
+}
+
 void
 tx_system_exit(void)
 {
@@ -633,6 +700,10 @@ tx_system_exit(void)
 int
 tx_system_init(int fd)
 {
+	int ret;
+
 	INIT_LIST_HEAD(&gbl_ops);
+	if ((ret = rm_recover()))
+		return ret;
 	return 0;
 }

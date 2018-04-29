@@ -1232,7 +1232,7 @@ static void *reorganiser(void *arg)
 		err = __bt_reorg(tx, t, mp);
 		assert(!err);
 		bt_page_put(mp);
-		err = txn_commit(tx);
+		err = txn_commit(tx, true);
 		assert(!err);
 		// txn_free(tx);
 	}

@@ -67,7 +67,6 @@ __put_ldp(struct locked_dp *ldp, pgno_t pgno)
 	pthread_mutex_lock(&hlock);
 	assert(ldp->count);
 	if (--ldp->count == 0) {
-		eprintf("putldp%ld\n", pgno);
 		hlist_del(&ldp->hq);
 		free(ldp);
 	}
@@ -81,11 +80,9 @@ __get_ldp(pgno_t pgno, struct dpage *dp, size_t size)
 	struct locked_dp *ldp;
 
 	pthread_mutex_lock(&hlock);
-	eprintf("looking %ld\n", pgno);
 	head = &hash_table[HASHKEY(pgno)];
 	hlist_for_each_entry(ldp, head, hq) {
 		if (ldp->pgno == pgno) {
-			eprintf("hhhhhhhhhhhhhhhhhhhhh\n");
 			ldp->count++;
 			pthread_mutex_unlock(&hlock);
 			return ldp;
@@ -99,7 +96,6 @@ __get_ldp(pgno_t pgno, struct dpage *dp, size_t size)
 	ldp->count = 1;
 	ldp->dp = (struct dpage *) (ldp + 1);
 	memcpy(ldp->dp, dp, size);
-	eprintf("insert:%ld\n", pgno);
 	hlist_add_head(&ldp->hq, head);
 	pthread_mutex_unlock(&hlock);
 	return ldp;
@@ -108,6 +104,7 @@ __get_ldp(pgno_t pgno, struct dpage *dp, size_t size)
 static int
 __init_mpage(struct mpage *mp)
 {
+	mp->ldp = NULL;
 	pthread_mutex_init(&mp->mutex, NULL);
 	return 0;
 }
@@ -126,16 +123,22 @@ __read_mpage(struct mpage *mp)
 static void
 __exit_mpage(struct mpage *mp, bool deleted)
 {
-	__put_ldp(mp->ldp, mp->pgno);
-	mp->ldp = NULL;
+	if (mp->ldp) {
+		__put_ldp(mp->ldp, mp->pgno);
+		mp->ldp = NULL;
+	}
 	return;	
 }
 
 void
 bm_page_system_exit(void)
 {
+	int i;
+
 	if (pm)
 		pm_free(pm);
+	for (i = 0; i < HASHSIZE; i++)
+		assert(hlist_empty(&hash_table[i]));
 }
 
 int 
