@@ -4,7 +4,6 @@
 #include "global.h"
 #include "tx_ext.h"
 #include "lm_ext.h"
-#include "pm_int.h"
 #include "list.h"
 
 enum pgop_type {
@@ -21,6 +20,7 @@ enum pgop_type {
 	PGOP_BLKRESET,
 	PGOP_COMMIT_PAGE,
 	PGOP_COMMIT_TXN,
+	PGOP_MAXOP,
 };
 
 #define PG_DOP_HDR							\
@@ -99,18 +99,31 @@ struct pgop_blkop {
 	uint16_t bit;
 } __attribute__((packed));
 
+struct pgdop_info {
+	uint64_t pgno;
+	uint64_t lsn;
+	uint64_t prev_lsn;
+};
+
+struct pgmop_info {
+	struct list_head	 pgops;
+	struct pgmop		*mop;
+};
+
+struct pgdop {
+	uint64_t		txid;	
+	uint16_t		npg;
+	struct pgdop_info	pginfo[0];
+} __attribute__ ((packed));
+
 struct pgmop {
 	lm_log_t		*lg;
 	struct txn		*tx;
-	struct page		*pg;
 	struct list_head	 lgops;
-	struct list_head	 pgops;
 	struct list_head	 txops;
-	bool			 tx_commited;
-	bool			 pg_commited;
-
-	size_t		size;
-	uint8_t		dop[0];
+	size_t			 size;
+	struct pgdop		*dop;
+	struct pgmop_info	 pginfo[0];
 };
 
 struct tx_commit_rec {
@@ -124,43 +137,17 @@ struct tx_commit_rec {
 struct txn {
 	uint64_t		 id;
 	struct list_head	 mops;
+	struct list_head	 txs;
 	struct pgmop		*mop;
-	int			 ncommited;
-	int			 ntotal;
-	struct mpage		*omp;
-	pg_mgr_t		*pm;
+	int			 npg_cmted;
+	int			 npg_total;
 };
 
-extern int	txn_log_ins(struct txn *tx, uint64_t pgno, uint64_t lsn,
-		    void *rec, size_t rec_len, int ins_idx, uint64_t *out_lsn,
-		    struct pgmop **out_mop);
-extern int	txn_log_del(struct txn *tx, uint64_t pgno, uint64_t lsn,
-		    void *rec, size_t rec_len, int del_idx, uint64_t *out_lsn,
-		    struct pgmop **out_mop);
-extern int	txn_log_rep(struct txn *tx, uint64_t pgno, uint64_t lsn,
-		    void *rec, size_t rec_len, void *key, size_t key_len,
-		    void *val, size_t val_len, int rep_idx, uint64_t *out_lsn,
-		    struct pgmop **out_mop);
-extern int	txn_log_split(struct txn *tx, uint64_t ppgno, uint64_t plsn, 
-		    uint64_t opgno, uint64_t olsn, uint64_t lpgno,
-		    uint64_t rpgno, int idx, int spl_idx, uint64_t *out_olsn, 
-		    uint64_t *out_plsn, uint64_t *out_llsn, uint64_t *out_rlsn,
-		    struct pgmop **out_omop, struct pgmop **out_lmop,
-		    struct pgmop **out_rmop, struct pgmop **out_pmop);
-extern int	txn_log_newroot(struct txn *tx, uint64_t ppgno, uint64_t opgno,
-		    uint64_t olsn, uint64_t lpgno, uint64_t rpgno,
-		    uint64_t mdpgno, uint64_t mdlsn, int ins_idx,
-		    int spl_idx, uint64_t *out_olsn, uint64_t *out_plsn,
-		    uint64_t *out_llsn, uint64_t *out_rlsn,
-		    uint64_t *out_mdlsn, struct pgmop **out_omop,
-		    struct pgmop **out_lmop, struct pgmop **out_rmop,
-		    struct pgmop **out_pmop, struct pgmop **out_mdmop);
-extern int	txn_log_bmop(struct txn *tx, uint64_t pgno, uint64_t lsn,
-		    int bu, int bit, bool, uint64_t *out_lsn,
-		    struct pgmop **out_mop); 
-extern void	txn_free_op(struct pgmop *mop);
-extern uint64_t txn_get_next_lsn(void);
-extern int	txn_commit_page(struct page *pg, int err);
-extern int	txn_commit_page_deleted(struct page *pg);
-extern int	txn_log_page(struct page *pg, void *data, size_t size);
+typedef void (*tx_commit_cb_t)(void *);
+
+extern int	txn_log_op(struct txn *tx, int npg, size_t len, char *fmt1,
+		    char *fmt2, ...);
+extern int	txn_commit_page(struct list_head *head, int err);
+extern int	txn_commit_page_deleted(struct list_head *head);
+//extern int	txn_log_page(struct page *pg, void *data, size_t size);
 #endif

@@ -6,7 +6,7 @@
 
 BTREE *t;
 
-#define MAX_ELE     (1000000)
+#define MAX_ELE     (100000)
 #define MAX_THREAD  (8)
 
 #define MAX_REGIONS (MAX_ELE / (3 * MAX_THREAD))
@@ -94,7 +94,7 @@ inserter(void *arg)
 		vmem[0] = key;
 		v.size = 250; //key % 249 + 1;
 
-		tx = txn_alloc();
+		tx = txn_alloc(false);
 		assert(!IS_ERR(tx));
 
 		err = bt_put(tx, t, &k, &v); 
@@ -134,7 +134,7 @@ deleter(void *arg)
 		key = p[i] * MAX_THREAD * 3 + id * 3 + switcher[si][2];
 		kmem[0] = key;
 
-		tx = txn_alloc();
+		tx = txn_alloc(false);
 		assert(!IS_ERR(tx));
 		err = bt_del(tx, t, &k);
 		if (!err) {

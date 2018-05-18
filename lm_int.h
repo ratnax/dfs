@@ -67,6 +67,4 @@ struct lm_log_t {
 	void	*mmaped_addr;
 	struct	 list_head list;
 };
-
-typedef size_t (*lm_rcb_t)(void *, size_t, void *); /* recovery callback */
 #endif

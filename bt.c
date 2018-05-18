@@ -455,7 +455,7 @@ __bt_page_shrink(BTREE *t, struct mpage *mp)
 
 static bool 
 __insert_leaf_at(BTREE *t, struct mpage *mp, const DBT *key, const DBT *val,
-				indx_t indx)
+    indx_t indx)
 {
 	struct dpage *old_dp, *dp = mp->dp;
 	size_t nbytes;
@@ -1226,7 +1226,7 @@ static void *reorganiser(void *arg)
 		pthread_mutex_unlock(&reorg_qlock);
 		if (!mp) 
 			break;
-		tx = txn_alloc();
+		tx = txn_alloc(true);
 		assert(!IS_ERR(tx));
 		
 		err = __bt_reorg(tx, t, mp);

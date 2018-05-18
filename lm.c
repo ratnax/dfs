@@ -149,20 +149,23 @@ bool lm_isfull(void)
 		return (head - tail) > 10; //(TX_LOG_NBLKS / 2);
 }
 
-void kkk(void) {}
+static pthread_mutex_t iolock = PTHREAD_MUTEX_INITIALIZER;
+
 lm_log_t *
 lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
 {
 	lm_log_t *lg;
 	int ret;
 
+	pthread_mutex_lock(&iolock);
 	do {
 		lg = logs[head];
 
 		if (-ENOSPC == (ret = log_writev(lg, iov, iovcnt, size))) {
-			kkk();
-			if ((ret = log_commit(lg)))
+			if ((ret = log_commit(lg))) {
+				pthread_mutex_unlock(&iolock);
 				return ERR_PTR(ret);
+			}
 			if (((head + 1) % TX_LOG_NBLKS) != tail)
 				head = (head + 1) % TX_LOG_NBLKS;
 			else
@@ -170,12 +173,15 @@ lm_writev(struct iovec *iov, size_t iovcnt, size_t size)
 		} else {
 			if (!ret) {
 				lg->commit_count++;	
+				pthread_mutex_unlock(&iolock);
 				return lg;
 			}
+			pthread_mutex_unlock(&iolock);
 			return ERR_PTR(ret);
 		}
 
 	} while (1);
+	pthread_mutex_unlock(&iolock);
 	return ERR_PTR(-ENOSPC);
 }
 
@@ -185,13 +191,15 @@ lm_write(void *data, size_t size)
 	lm_log_t *lg;
 	int ret;
 
+	pthread_mutex_lock(&iolock);
 	do {
 		lg = logs[head];
 
 		if (-ENOSPC == (ret = log_write(lg, data, size))) {
-			kkk();
-			if ((ret = log_commit(lg)))
+			if ((ret = log_commit(lg))) {
+				pthread_mutex_unlock(&iolock);
 				return ERR_PTR(ret);
+			}
 			if (((head + 1) % TX_LOG_NBLKS) != tail)
 				head = (head + 1) % TX_LOG_NBLKS;
 			else
@@ -199,19 +207,27 @@ lm_write(void *data, size_t size)
 		} else {
 			if (!ret) {
 				lg->commit_count++;	
+				pthread_mutex_unlock(&iolock);
 				return lg;
 			}
+			pthread_mutex_unlock(&iolock);
 			return ERR_PTR(ret);
 		}
 
 	} while (1);
+	pthread_mutex_unlock(&iolock);
 	return ERR_PTR(-ENOSPC);
 }
 
 int 
 lm_commit(void)
 {
-	return log_commit(logs[head]);
+	int ret;
+
+	pthread_mutex_lock(&iolock);
+	ret = log_commit(logs[head]);
+	pthread_mutex_unlock(&iolock);
+	return ret;
 }
 
 int
@@ -219,16 +235,20 @@ log_put(lm_log_t *lg)
 {
 	int ret = 0;
 
+	pthread_mutex_lock(&iolock);
 	--lg->commit_count;
 	do {
 		if (logs[tail]->commit_count)
 			break;
-		if ((ret = log_finish(logs[tail])))
+		if ((ret = log_finish(logs[tail]))) {
+			pthread_mutex_unlock(&iolock);
 			return ret;
+		}
 		if (tail == head) 
 			break;
 		tail = (tail + 1) % TX_LOG_NBLKS; 
 	} while (1);
+	pthread_mutex_unlock(&iolock);
 	return ret;
 }
 
@@ -533,7 +553,8 @@ __recover_sector(lm_log_t *lg, void *buf, loff_t sect)
 }
 
 int
-log_recover(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
+log_recover(lm_log_t *lg, void *buf, size_t size, int idx, lm_rcb_t cb,
+    void *cb_arg)
 {
 	loff_t off = 0, sec_off;
 	ssize_t len, sec;
@@ -548,7 +569,7 @@ log_recover(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
 		memmove(buf + off, lg->sect + SECT_DLM_SIZE, len);
 		off += len;
 		if ((size - off) < SECT_DATA_SIZE) {
-			if ((ret_len = (*cb)(buf, off, cb_arg)) < 0) 
+			if ((ret_len = (*cb)(buf, off, idx, cb_arg)) < 0) 
 				return ret_len;
 			memmove(buf, buf + ret_len, off - ret_len);
 			off -= ret_len;
@@ -557,8 +578,10 @@ log_recover(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
 		if (len < SECT_DATA_SIZE)
 			break;
 	}
-	if (off && ((ret_len = (*cb)(buf, off, cb_arg)) < 0)) 
+	ret_len = 0;
+	if (off && ((ret_len = (*cb)(buf, off, idx, cb_arg)) < 0)) 
 		return ret_len;
+	total_len += ret_len;
 	sec = total_len / SECT_DATA_SIZE;
 	sec_off = total_len % SECT_DATA_SIZE;
 	lg->off = lg->coff = (sec << SECT_SHFT);
@@ -629,10 +652,18 @@ log_alloc(int fd, loff_t offset, size_t size, void *addr)
 }
 
 static size_t
-__recover(void *data, size_t size, void *arg)
+__recover(void *data, size_t size, int idx, void *arg)
 {
 	printf("hai %ld\n", size);
 	return size;
+}
+
+int 
+lm_set_valid_range(int in_head, int in_tail)
+{
+	head = in_head;
+	tail = in_tail;
+	eprintf("head:%d tail:%d\n", head, tail);
 }
 
 int
@@ -643,15 +674,35 @@ lm_scan(lm_rcb_t rcb, void *arg)
 
 	if (!(buf = malloc(8192)))
 		return -ENOMEM;
-	for (i = 0; i < TX_LOG_NBLKS; i++) {
+	if (head < tail) {
+		for (i = tail; i < TX_LOG_NBLKS; i++) {
+			eprintf("recovering log %d\n", i);
+			if ((ret = log_recover(logs[i], buf, 8192, i, rcb,
+			    arg))) {
+				if (ret == -ENXIO) {
+					if ((ret = log_finish(logs[i]))) {
+						free(buf);
+						return ret;
+					}
+				} else if (ret != -EAGAIN) { 
+					free(buf);
+					return ret;
+				}
+			}
+		}
+		i = 0;
+	} else {
+		i = tail;
+	}
+	for (; i <= head; i++) {
 		eprintf("recovering log %d\n", i);
-		if ((ret = log_recover(logs[i], buf, 8192, rcb, arg))) {
+		if ((ret = log_recover(logs[i], buf, 8192, i, rcb, arg))) {
 			if (ret == -ENXIO) {
 				if ((ret = log_finish(logs[i]))) {
 					free(buf);
 					return ret;
 				}
-			} else { 
+			} else if (ret != -EAGAIN) { 
 				free(buf);
 				return ret;
 			}
@@ -683,7 +734,7 @@ int lm_system_init(int fd, loff_t off)
 		}
 		logs[i] = lg;
 	}
-	head = 0;
+	head = TX_LOG_NBLKS - 1;
 	tail = 0;
 	return 0;
 }
@@ -708,7 +759,7 @@ lm_mkfs(int fd, loff_t off)
 
 #ifdef TEST
 static size_t
-__log_recover(void *data, size_t size, void *arg)
+__log_recover(void *data, size_t size, int idx, void *arg)
 {
 	printf("hai %ld\n", size);
 	return size;
@@ -739,7 +790,7 @@ int main(int argc, char **argv)
 		return PTR_ERR(lg);
 	if (argv[2][0] == 'i' && (ret = log_finish(lg)))
 		return ret;
-	if ((ret = log_recover(lg, buf, 4 * 1024, __log_recover, NULL)))
+	if ((ret = log_recover(lg, buf, 4 * 1024, 0, __log_recover, NULL)))
 		return ret;
 	for (i = 0; i < atoi(argv[3]); i++) {
 		char buf[100];

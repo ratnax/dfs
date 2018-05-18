@@ -129,7 +129,7 @@ extern struct mpage	*bt_page_new(struct txn *tx, size_t size);
 extern int		 bt_page_system_init(void);
 extern void		 bt_page_system_exit(void);
 
-extern struct txn	*bt_txn_alloc(void);
+extern struct txn	*bt_txn_alloc(bool);
 extern void		 bt_txn_free(struct txn *tx);
 
 extern int	bt_txn_log_ins_leaf(struct txn *tx, struct mpage *mp,

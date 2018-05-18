@@ -50,10 +50,13 @@ bm_page_put(struct mpage *mp)
 	return pm_page_put(pm, mp);
 }
 
+enum { OP_SET, OP_RST };
+
 int
 bm_txn_log_bmop(struct txn *tx, struct mpage *mp, int bu, int bit, bool set)
 {
-	return pm_txn_log_bmop(pm, tx, mp, bu, bit, set);
+	return pm_txn_log_op(pm, tx, 1, 0, 1 + 4 + 4, "cww", mp, 
+	    set ? OP_SET : OP_RST, bu, bit);
 }
 
 #define HASHSIZE	100
@@ -149,8 +152,8 @@ bm_page_system_init(void)
 	for (i = 0; i < HASHSIZE; i++)
 		INIT_HLIST_HEAD(&hash_table[i]);
 
-	if (IS_ERR(pm = pm_alloc(sizeof (struct mpage), __init_mpage,
-	    __read_mpage, __exit_mpage, 10)))
+	if (IS_ERR(pm = pm_alloc(PM_TYPE_BM, sizeof (struct mpage),
+	    __init_mpage, __read_mpage, __exit_mpage, 0)))
 		return PTR_ERR(pm);
 	return 0;
 }

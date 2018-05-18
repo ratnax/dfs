@@ -3,9 +3,9 @@
 
 static pg_mgr_t *pm;
 
-struct txn *bt_txn_alloc(void)
+struct txn *bt_txn_alloc(bool sys)
 {
-	return txn_alloc();
+	return txn_alloc(sys);
 }
 
 void bt_txn_free(struct txn *tx)
@@ -13,28 +13,36 @@ void bt_txn_free(struct txn *tx)
 	txn_free(tx);
 }
 
+enum { OP_INS, OP_DEL, OP_IDEL, OP_REP, OP_SPL, OP_RSPL };
+
 int
 bt_txn_log_ins_leaf(struct txn *tx, struct mpage *mp, int ins_idx)
 {
 	DLEAF *dl = GETDLEAF(mp->dp, ins_idx);
+	int n = NDLEAF(dl);
 
-	return pm_txn_log_ins(pm, tx, mp, dl, NDLEAF(dl), ins_idx);
+	return pm_txn_log_op(pm, tx, 1, 0, (1 + 4 + n + 4), "cwdw", mp, OP_INS,
+	    0, dl, n, ins_idx);  
 }
 
 int
 bt_txn_log_del_leaf(struct txn *tx, struct mpage *mp, int del_idx)
 {
 	DLEAF *dl = GETDLEAF(mp->dp, del_idx);
+	int n = NDLEAF(dl);
 
-	return pm_txn_log_del(pm, tx, mp, dl, NDLEAF(dl), del_idx);
+	return pm_txn_log_op(pm, tx, 1, 0, (1 + 4 + n + 4), "cwdw", mp, OP_DEL,
+	    0, dl, n, del_idx);  
 }
 
 int
 bt_txn_log_del_internal(struct txn *tx, struct mpage *mp, int del_idx)
 {
 	DINTERNAL *di = GETDINTERNAL(mp->dp, del_idx);
+	int n = NDINTERNAL(di->ksize);
 
-	return pm_txn_log_del(pm, tx, mp, di, NDINTERNAL(di->ksize), del_idx);
+	return pm_txn_log_op(pm, tx, 1, 0, (1 + 4 + n + 4), "cwdw", mp, OP_IDEL,
+	    0, di, n, del_idx);  
 }
 
 int
@@ -42,21 +50,25 @@ bt_txn_log_rep_leaf(struct txn *tx, struct mpage *mp, DBT *key, DBT *val,
     int rep_idx)
 {
 	DLEAF *dl = GETDLEAF(mp->dp, rep_idx);
+	int n = NDLEAF(dl);
 
-	return pm_txn_log_rep(pm, tx, mp, dl, NDLEAF(dl), key, key->size,
-	    val, val->size, rep_idx);
+	return pm_txn_log_op(pm, tx, 1, 0,
+	    1 + 4 + n + key->size + val->size + 4, "cwdddw", mp, OP_REP, 0, dl,
+	    NDLEAF(dl), key, key->size, val, val->size, rep_idx);
 }
 
 int bt_txn_log_split(struct txn *tx, struct mpage *pmp, struct mpage *mp,
     struct mpage *lmp, struct mpage *rmp, indx_t idx, indx_t spl_idx)
 {
-	return pm_txn_log_split(pm, tx, pmp, mp, lmp, rmp, idx, spl_idx);
+	return pm_txn_log_op(pm, tx, 3, 1, 1 + 4 + 4 + 4, "cwww", pmp, lmp, 
+	    rmp, mp, OP_SPL, 0, idx, spl_idx);
 }
 
 int bt_txn_log_newroot(struct txn *tx, struct mpage *pmp, struct mpage *mp,
     struct mpage *lmp, struct mpage *rmp, struct mpage *mdmp, indx_t spl_idx)
 {
-	return pm_txn_log_newroot(pm, tx, pmp, mp, lmp, rmp, mdmp, 0, spl_idx); 
+	return pm_txn_log_op(pm, tx, 4, 1, 1 + 4 + 4, "cww", pmp, lmp, rmp,
+	    mdmp, mp, "cww", OP_RSPL, 0, spl_idx);
 }
 
 void
@@ -172,8 +184,8 @@ bt_page_system_exit(void)
 int
 bt_page_system_init(void)
 {
-	if (IS_ERR(pm = pm_alloc(sizeof (struct mpage), &__init_mpage,
-	    &__read_mpage, &__exit_mpage, 50)))
+	if (IS_ERR(pm = pm_alloc(PM_TYPE_BT, sizeof (struct mpage), 
+	    &__init_mpage, &__read_mpage, &__exit_mpage, 0)))
 		return (PTR_ERR(pm));
 	return (0);
 }
