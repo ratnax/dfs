@@ -15,14 +15,62 @@ void bt_txn_free(struct txn *tx)
 
 enum { OP_INS, OP_DEL, OP_IDEL, OP_REP, OP_SPL, OP_RSPL };
 
+struct ins_leaf_op {
+	uint8_t		op;
+	uint8_t		dbid;
+	uint16_t	ins_idx;
+	uint16_t	rec_len;
+	uint8_t		bytes[0];
+};
+
+struct del_leaf_op {
+	uint8_t		op;
+	uint8_t		dbid;
+	uint16_t	ins_idx;
+	uint16_t	rec_len;
+	uint8_t		bytes[0];
+};
+
+struct del_internal_op {
+	uint8_t		op;
+	uint8_t		dbid;
+	uint16_t	del_idx;
+	uint16_t	rec_len;
+	uint8_t		bytes[0];
+};
+
+struct spl_op {
+	uint8_t		op;
+	uint8_t		dbid;
+	uint16_t	ins_idx;
+	uint16_t	spl_idx;
+};
+
+struct rspl_op {
+	uint8_t		op;
+	uint8_t		dbid;
+	uint16_t	ins_idx;
+	uint16_t	spl_idx;
+};
+
+
 int
 bt_txn_log_ins_leaf(struct txn *tx, struct mpage *mp, int ins_idx)
 {
 	DLEAF *dl = GETDLEAF(mp->dp, ins_idx);
 	int n = NDLEAF(dl);
+	struct ins_leaf_op	*p;
+	size_t len = sizeof (struct ins_op) + n;
 
-	return pm_txn_log_op(pm, tx, 1, 0, (1 + 4 + n + 4), "cwdw", mp, OP_INS,
-	    0, dl, n, ins_idx);  
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = OP_INS;
+	p->dbid = 0;
+	p->ins_idx = ins_idx;
+	p->rec_len = n;
+	memcpy(p->bytes, dl, n);
+	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
 }
 
 int
@@ -30,9 +78,18 @@ bt_txn_log_del_leaf(struct txn *tx, struct mpage *mp, int del_idx)
 {
 	DLEAF *dl = GETDLEAF(mp->dp, del_idx);
 	int n = NDLEAF(dl);
+	struct del_leaf_op *p;
+	size_t len = sizeof (struct del_leaf_op) + n;
 
-	return pm_txn_log_op(pm, tx, 1, 0, (1 + 4 + n + 4), "cwdw", mp, OP_DEL,
-	    0, dl, n, del_idx);  
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = OP_DEL;
+	p->dbid = 0;
+	p->del_idx = del_idx;
+	p->rec_len = n;
+	memcpy(p->bytes, dl, n);
+	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
 }
 
 int
@@ -40,9 +97,18 @@ bt_txn_log_del_internal(struct txn *tx, struct mpage *mp, int del_idx)
 {
 	DINTERNAL *di = GETDINTERNAL(mp->dp, del_idx);
 	int n = NDINTERNAL(di->ksize);
+	struct del_internal_op *p;
+	size_t len = sizeof (struct del_internal_op) + n;
 
-	return pm_txn_log_op(pm, tx, 1, 0, (1 + 4 + n + 4), "cwdw", mp, OP_IDEL,
-	    0, di, n, del_idx);  
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = OP_IDEL;
+	p->dbid = 0;
+	p->del_idx = del_idx;
+	p->rec_len = n;
+	memcpy(p->bytes, di, n);
+	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
 }
 
 int
@@ -51,24 +117,51 @@ bt_txn_log_rep_leaf(struct txn *tx, struct mpage *mp, DBT *key, DBT *val,
 {
 	DLEAF *dl = GETDLEAF(mp->dp, rep_idx);
 	int n = NDLEAF(dl);
+	struct rep_leaf_op *p;
+	size_t len = sizeof (struct rep_leaf_op) + n + key->size + val->size;
 
-	return pm_txn_log_op(pm, tx, 1, 0,
-	    1 + 4 + n + key->size + val->size + 4, "cwdddw", mp, OP_REP, 0, dl,
-	    NDLEAF(dl), key, key->size, val, val->size, rep_idx);
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = OP_REP;
+	p->dbid = 0;
+	p->rep_idx = rep_idx;
+	p->rec_len = n + key->size + val->size;
+	memcpy(p->bytes, dl, n);
+	memcpy(&p->bytes[n], key, key->size);
+	memcpy(&p->bytes[n + key->size], val, val->size);
+	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
 }
 
 int bt_txn_log_split(struct txn *tx, struct mpage *pmp, struct mpage *mp,
-    struct mpage *lmp, struct mpage *rmp, indx_t idx, indx_t spl_idx)
+    struct mpage *lmp, struct mpage *rmp, indx_t ins_idx, indx_t spl_idx)
 {
-	return pm_txn_log_op(pm, tx, 3, 1, 1 + 4 + 4 + 4, "cwww", pmp, lmp, 
-	    rmp, mp, OP_SPL, 0, idx, spl_idx);
+	struct spl_op *p;
+	size_t len = sizeof (struct spl_op);
+
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = OP_SPL;
+	p->dbid = 0;
+	p->ins_idx = ins_idx;
+	p->spl_idx = spl_idx;
+	return pm_txn_log_op(pm, tx, p, len, 3, 1, pmp, lmp, rmp, mp);
 }
 
 int bt_txn_log_newroot(struct txn *tx, struct mpage *pmp, struct mpage *mp,
     struct mpage *lmp, struct mpage *rmp, struct mpage *mdmp, indx_t spl_idx)
 {
-	return pm_txn_log_op(pm, tx, 4, 1, 1 + 4 + 4, "cww", pmp, lmp, rmp,
-	    mdmp, mp, "cww", OP_RSPL, 0, spl_idx);
+	struct rspl_op *p;
+	size_t len = sizeof (struct rspl_op);
+
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = OP_RSPL;
+	p->dbid = 0;
+	p->spl_idx = spl_idx;
+	return pm_txn_log_op(pm, tx, p, len, 3, 1, pmp, lmp, rmp, mdmp, mp);
 }
 
 void

@@ -52,11 +52,25 @@ bm_page_put(struct mpage *mp)
 
 enum { OP_SET, OP_RST };
 
+struct bm_op {
+	uint8_t op;
+	uint32_t bu;
+	uint32_t bit;
+};
+
 int
 bm_txn_log_bmop(struct txn *tx, struct mpage *mp, int bu, int bit, bool set)
 {
-	return pm_txn_log_op(pm, tx, 1, 0, 1 + 4 + 4, "cww", mp, 
-	    set ? OP_SET : OP_RST, bu, bit);
+	struct bm_op *p;
+	size_t len = sizeof (struct bm_op);
+
+	if (!(p = malloc(len)))
+		return -ENOMEM;
+
+	p->op = set ? OP_SET : OP_RST;
+	p->bu = bu;
+	p->bit = bit;
+	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
 }
 
 #define HASHSIZE	100
