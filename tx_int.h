@@ -4,6 +4,7 @@
 #include "global.h"
 #include "tx_ext.h"
 #include "lm_ext.h"
+#include "mm_ext.h"
 #include "list.h"
 
 enum pgop_type {
@@ -121,7 +122,9 @@ struct pgmop {
 	struct txn		*tx;
 	struct list_head	 lgops;
 	struct list_head	 txops;
-	size_t			 size;
+	size_t			 dop_size;
+	size_t			 mop_size;
+	mm_blk_t		*mb;
 	struct pgdop		*dop;
 	struct pgmop_info	 pginfo[0];
 };
@@ -141,12 +144,12 @@ struct txn {
 	struct pgmop		*mop;
 	int			 npg_cmted;
 	int			 npg_total;
+	mm_blk_t		*mb;
 };
 
 typedef void (*tx_commit_cb_t)(void *);
 
-extern int	txn_log_op(struct txn *tx, int npg, size_t len, char *fmt1,
-		    char *fmt2, ...);
+extern int	txn_log_op(struct txn *tx, size_t len, int npg, ...);
 extern int	txn_commit_page(struct list_head *head, int err);
 extern int	txn_commit_page_deleted(struct list_head *head);
 //extern int	txn_log_page(struct page *pg, void *data, size_t size);

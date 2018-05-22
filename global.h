@@ -21,7 +21,7 @@
 
 #include "err.h"
 
-//#define printf(fmt, ...) 
+#define printf(fmt, ...) 
 #define eprintf(fmt, ...) fprintf(stdout, fmt, ##__VA_ARGS__)
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))

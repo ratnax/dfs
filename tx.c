@@ -50,6 +50,7 @@ struct txn *txn_alloc(bool sys)
 	tx->npg_cmted = 0;
 	tx->npg_total = 0;
 	tx->mop = NULL;
+	tx->mb = NULL;
 	pthread_mutex_lock(&_mutex);
 	kkk++;
 	list_add_tail(&tx->txs, &txlist);
@@ -59,7 +60,32 @@ struct txn *txn_alloc(bool sys)
 }
 
 int
-txn_log_op(struct txn *tx, int npg, size_t len, char *fmt1, char *fmt2, ...)
+txn_reserve(struct txn *tx)
+{
+	mm_blk_t *mb;
+
+	if (IS_ERR(mb = mm_reserve()))
+		return PTR_ERR(mb);
+	tx->mb = mb;
+	return 0;
+}
+
+void
+txn_unreserve(struct txn *tx)
+{
+	mm_unreserve(tx->mb);
+	tx->mb = NULL;
+}
+
+void *
+txn_mem_alloc(struct txn *tx, size_t size)
+{
+	assert(tx->mb);
+	return mm_alloc(tx->mb, size);
+}
+
+int
+txn_log_op(struct txn *tx, size_t len, int npg, ...)
 {
 	struct pgmop *mop;
 	struct pgdop *dop;
@@ -69,13 +95,14 @@ txn_log_op(struct txn *tx, int npg, size_t len, char *fmt1, char *fmt2, ...)
 	size_t mop_size;
 	int i, n;
 
-	dop_size = sizeof(struct pgdop) + npg * sizeof(struct pgdop_info) + len;
-	dop_size = (dop_size + 1) & ~1UL;
+	dop_size = sizeof(struct pgdop) + npg * sizeof(struct pgdop_info);
+	if (dop_size % 2)
+		dop_size++;
 	mop_size = sizeof (struct pgmop) + npg * sizeof (struct pgmop_info);
-	if (!(mop = malloc(mop_size + dop_size)))
-		return -ENOMEM;
 
-	va_start(valist, fmt2);
+	mop = txn_mem_alloc(tx, mop_size + dop_size);
+
+	va_start(valist, npg);
 
 	dop = ((void *) mop) + mop_size;
 	dop->txid = tx->id;
@@ -95,45 +122,10 @@ txn_log_op(struct txn *tx, int npg, size_t len, char *fmt1, char *fmt2, ...)
 		list_add_tail(&mop->pginfo[i].pgops, head);
 		mop->pginfo[i].mop = mop;
 	}
-	p = (void *) &dop->pginfo[i];
-redo:
-	while (fmt1 && fmt1[0]) {
-		switch (fmt1[0]) {
-	    	case 'c':
-			*(char *) p = va_arg(valist, int);
-			p += 1;
-			break;
-		case 'w':
-			*(uint32_t *) p = va_arg(valist, int);
-			p += 4;
-			break;
-		case 'p':
-			*(uint64_t *) p = va_arg(valist, uint64_t);
-			p += 8;
-			break;
-		case 'd':
-			d = va_arg(valist, char *);
-			n = va_arg(valist, int); 
-			memcpy(p, d, n);
-			p += n;
-			break;
-		default:
-			break;
-		}
-		fmt1++;
-	}
-	if (fmt2) {
-		va_end(valist);
-		valist[0] =  (*(va_list *)va_arg(valist, va_list *))[0];
-		fmt1 = fmt2;
-		fmt2 = NULL;
-		goto redo;
-	} else {
-		// va_end(valist);
-	}
-	assert (p <= (((void *) mop) + mop_size + dop_size));
 	mop->dop = dop;
-	mop->size = dop_size;
+	mop->dop_size = dop_size;
+	mop->mop_size = mop_size;
+	mop->mb = tx->mb;
 	mop->tx = tx;
 
 	pthread_mutex_lock(&txlock);
@@ -199,7 +191,7 @@ __tx_ops_flush()
 		return 0;
 
 	list_for_each_entry(mop, &list, lgops) {
-		if (IS_ERR(lg = lm_write(mop->dop, mop->size))) {
+		if (IS_ERR(lg = lm_write(mop->dop, mop->dop_size))) {
 			return PTR_ERR(lg);
 		}
 		assert(lg);
@@ -218,10 +210,11 @@ __end_tx(struct txn *tx)
 		log_put(mop->lg);
 		(g_tx_commit_cb)(((void *)(mop->dop + 1)) +
 		    (sizeof (struct pgdop_info) * mop->dop->npg));
-		free(mop);
+		mm_free(mop->mb, mop, mop->dop_size + mop->mop_size);
 	}
-	log_put(tx->mop->lg);
-	free(tx->mop);
+	mop = tx->mop;
+	log_put(mop->lg);
+	free(mop);
 	tx->mop = NULL;
 	txn_free(tx);
 }
@@ -272,14 +265,14 @@ txn_commit(struct txn *tx, bool sys)
 	cr->type = PGOP_COMMIT_TXN;
 	cr->txid = tx->id;
 
-	mop->size = sizeof (struct tx_commit_rec);
+	mop->dop_size = sizeof (struct tx_commit_rec);
+	mop->mop_size = sizeof (struct pgmop);
 	
 	pthread_mutex_lock(&iolock);
 	if ((ret = __tx_ops_flush())) {
 		pthread_mutex_unlock(&iolock);
 		return ret;
 	}
-
 	assert((sizeof(struct tx_commit_rec) % 2) == 0);
 	if (IS_ERR(lg = lm_write(cr, sizeof(struct tx_commit_rec)))) {
 		pthread_mutex_unlock(&iolock);

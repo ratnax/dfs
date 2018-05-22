@@ -221,6 +221,8 @@ int main(int argc, char **argv)
 		return err;
 	if ((err = rm_system_init(fd)))
 		return err;
+	if ((err = mm_system_init(512 + 256)))
+		return err;
 	if ((err = tx_system_init(fd)))
 		return err;
 	if ((err = pm_system_init(fd)))

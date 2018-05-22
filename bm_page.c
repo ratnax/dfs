@@ -8,10 +8,10 @@ bm_page_rdlock(struct mpage *mp)
 	pm_page_rdlock(pm, mp);
 }
 
-void
-bm_page_wrlock(struct mpage *mp)
+int
+bm_page_wrlock(struct txn *tx, struct mpage *mp)
 {
-	pm_page_wrlock(pm, mp);
+	return pm_page_wrlock(pm, tx, mp);
 }
 
 void
@@ -64,13 +64,11 @@ bm_txn_log_bmop(struct txn *tx, struct mpage *mp, int bu, int bit, bool set)
 	struct bm_op *p;
 	size_t len = sizeof (struct bm_op);
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = set ? OP_SET : OP_RST;
 	p->bu = bu;
 	p->bit = bit;
-	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
+	return pm_txn_log_op(pm, tx, len, 1, 0, mp);
 }
 
 #define HASHSIZE	100
@@ -167,7 +165,7 @@ bm_page_system_init(void)
 		INIT_HLIST_HEAD(&hash_table[i]);
 
 	if (IS_ERR(pm = pm_alloc(PM_TYPE_BM, sizeof (struct mpage),
-	    __init_mpage, __read_mpage, __exit_mpage, 0)))
+	    __init_mpage, __read_mpage, __exit_mpage, 10)))
 		return PTR_ERR(pm);
 	return 0;
 }

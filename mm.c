@@ -2,7 +2,7 @@
 #include "list.h"
 #include "mm_ext.h"
 
-#define MEM_BLK_SHFT 12
+#define MEM_BLK_SHFT 16
 #define MEM_BLK_SIZE (1 << MEM_BLK_SHFT)
 
 typedef enum {INUSE, UNUSABLE, TOUSE} mb_state_t;
@@ -138,7 +138,7 @@ void mm_free(mm_blk_t *mb, void *p, size_t size)
 		hdr = mb->tail = mb->tail - hdr->size - sizeof (struct ele_hdr);
 
 		if (mb->tail < mb->head && 
-		    (mb->tail - mb->frst < mb_rsvd_size)) {
+		    mb->tail - mb->frst < mb_rsvd_size) {
 			hdr = mb->tail = mb->last - sizeof (struct ele_hdr);
 			printf("%p free loop1 %d %d bit:%d hsize %d\n", mb,
 			    mb->head - mb->frst, mb->tail - mb->frst, hdr->free,
@@ -180,6 +180,7 @@ mm_system_exit()
 {
 }
 
+#ifdef TEST
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
@@ -251,3 +252,4 @@ int main()
 	pthread_join(t, NULL);
 
 }
+#endif

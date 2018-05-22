@@ -1,4 +1,5 @@
 #include "pm_ext.h"
+#include "tx_ext.h"
 #include "bt_int.h"
 
 static pg_mgr_t *pm;
@@ -26,7 +27,7 @@ struct ins_leaf_op {
 struct del_leaf_op {
 	uint8_t		op;
 	uint8_t		dbid;
-	uint16_t	ins_idx;
+	uint16_t	del_idx;
 	uint16_t	rec_len;
 	uint8_t		bytes[0];
 };
@@ -39,6 +40,14 @@ struct del_internal_op {
 	uint8_t		bytes[0];
 };
 
+struct rep_op {
+	uint8_t		op;
+	uint8_t		dbid;
+	uint16_t	rep_idx;
+	uint16_t	rec_len;
+	uint8_t		bytes[0];
+};
+	
 struct spl_op {
 	uint8_t		op;
 	uint8_t		dbid;
@@ -53,24 +62,21 @@ struct rspl_op {
 	uint16_t	spl_idx;
 };
 
-
 int
 bt_txn_log_ins_leaf(struct txn *tx, struct mpage *mp, int ins_idx)
 {
 	DLEAF *dl = GETDLEAF(mp->dp, ins_idx);
 	int n = NDLEAF(dl);
 	struct ins_leaf_op	*p;
-	size_t len = sizeof (struct ins_op) + n;
+	size_t len = sizeof (struct ins_leaf_op) + n;
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = OP_INS;
 	p->dbid = 0;
 	p->ins_idx = ins_idx;
 	p->rec_len = n;
 	memcpy(p->bytes, dl, n);
-	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
+	return pm_txn_log_op(pm, tx, len, 1, 0, mp);
 }
 
 int
@@ -81,15 +87,13 @@ bt_txn_log_del_leaf(struct txn *tx, struct mpage *mp, int del_idx)
 	struct del_leaf_op *p;
 	size_t len = sizeof (struct del_leaf_op) + n;
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = OP_DEL;
 	p->dbid = 0;
 	p->del_idx = del_idx;
 	p->rec_len = n;
 	memcpy(p->bytes, dl, n);
-	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
+	return pm_txn_log_op(pm, tx, len, 1, 0, mp);
 }
 
 int
@@ -100,15 +104,13 @@ bt_txn_log_del_internal(struct txn *tx, struct mpage *mp, int del_idx)
 	struct del_internal_op *p;
 	size_t len = sizeof (struct del_internal_op) + n;
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = OP_IDEL;
 	p->dbid = 0;
 	p->del_idx = del_idx;
 	p->rec_len = n;
 	memcpy(p->bytes, di, n);
-	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
+	return pm_txn_log_op(pm, tx, len, 1, 0, mp);
 }
 
 int
@@ -117,12 +119,10 @@ bt_txn_log_rep_leaf(struct txn *tx, struct mpage *mp, DBT *key, DBT *val,
 {
 	DLEAF *dl = GETDLEAF(mp->dp, rep_idx);
 	int n = NDLEAF(dl);
-	struct rep_leaf_op *p;
-	size_t len = sizeof (struct rep_leaf_op) + n + key->size + val->size;
+	struct rep_op *p;
+	size_t len = sizeof (struct rep_op) + n + key->size + val->size;
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = OP_REP;
 	p->dbid = 0;
 	p->rep_idx = rep_idx;
@@ -130,7 +130,7 @@ bt_txn_log_rep_leaf(struct txn *tx, struct mpage *mp, DBT *key, DBT *val,
 	memcpy(p->bytes, dl, n);
 	memcpy(&p->bytes[n], key, key->size);
 	memcpy(&p->bytes[n + key->size], val, val->size);
-	return pm_txn_log_op(pm, tx, p, len, 1, 0, mp);
+	return pm_txn_log_op(pm, tx, len, 1, 0, mp);
 }
 
 int bt_txn_log_split(struct txn *tx, struct mpage *pmp, struct mpage *mp,
@@ -139,14 +139,12 @@ int bt_txn_log_split(struct txn *tx, struct mpage *pmp, struct mpage *mp,
 	struct spl_op *p;
 	size_t len = sizeof (struct spl_op);
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = OP_SPL;
 	p->dbid = 0;
 	p->ins_idx = ins_idx;
 	p->spl_idx = spl_idx;
-	return pm_txn_log_op(pm, tx, p, len, 3, 1, pmp, lmp, rmp, mp);
+	return pm_txn_log_op(pm, tx, len, 3, 1, pmp, lmp, rmp, mp);
 }
 
 int bt_txn_log_newroot(struct txn *tx, struct mpage *pmp, struct mpage *mp,
@@ -155,13 +153,11 @@ int bt_txn_log_newroot(struct txn *tx, struct mpage *pmp, struct mpage *mp,
 	struct rspl_op *p;
 	size_t len = sizeof (struct rspl_op);
 
-	if (!(p = malloc(len)))
-		return -ENOMEM;
-
+	p = txn_mem_alloc(tx, len);
 	p->op = OP_RSPL;
 	p->dbid = 0;
 	p->spl_idx = spl_idx;
-	return pm_txn_log_op(pm, tx, p, len, 3, 1, pmp, lmp, rmp, mdmp, mp);
+	return pm_txn_log_op(pm, tx, len, 3, 1, pmp, lmp, rmp, mdmp, mp);
 }
 
 void
@@ -228,10 +224,10 @@ bt_page_rdlock(struct mpage *mp)
 	pm_page_rdlock(pm, mp);
 }
 
-void
-bt_page_wrlock(struct mpage *mp)
+int
+bt_page_wrlock(struct txn *tx, struct mpage *mp)
 {
-	pm_page_wrlock(pm, mp);
+	return pm_page_wrlock(pm, tx, mp);
 }
 
 void
@@ -278,7 +274,7 @@ int
 bt_page_system_init(void)
 {
 	if (IS_ERR(pm = pm_alloc(PM_TYPE_BT, sizeof (struct mpage), 
-	    &__init_mpage, &__read_mpage, &__exit_mpage, 0)))
+	    &__init_mpage, &__read_mpage, &__exit_mpage, 50)))
 		return (PTR_ERR(pm));
 	return (0);
 }

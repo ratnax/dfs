@@ -35,6 +35,7 @@ struct page {
 	struct list_head	q;		/* lru queue */
 	struct list_head	mops;
 	struct pgmop		*mop;
+	struct txn		*tx;
 	
 	void			*dp_mem;
 	PAGE_STRUCT_TLR;

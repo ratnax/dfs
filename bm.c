@@ -13,7 +13,7 @@ __blk_alloc(struct txn *tx, struct mpage *mp, uint64_t unit, uint64_t *map,
 	struct dpage *dp, *lm_dp;
 	struct bunit *bu, *lm_bu;
 
-	bm_page_wrlock(mp);
+	bm_page_wrlock(tx, mp);
 	lm_dp = mp->ldp->dp;
 	dp = mp->dp;
 	lm_bu = &lm_dp->bu[unit % DP_NBUNIT];
@@ -91,7 +91,7 @@ bm_blk_locked_free(struct txn *tx, blk_t blk)
 	mp = bm_page_get(pgno);
 	if (IS_ERR(mp))
 		return (PTR_ERR(mp));
-	bm_page_wrlock(mp);
+	bm_page_wrlock(tx, mp);
 	dp = mp->dp;
 	bu = &dp->bu[unit % DP_NBUNIT];
 	bit = BLK2BIT(bu, blk);

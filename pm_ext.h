@@ -43,7 +43,8 @@ typedef int (*read_mpage_t)(struct mpage *);
 typedef void (*exit_mpage_t)(struct mpage *, bool);
 
 extern void		 pm_page_rdlock(pg_mgr_t *, struct mpage *);
-extern void		 pm_page_wrlock(pg_mgr_t *, struct mpage *);
+extern int		 pm_page_wrlock(pg_mgr_t *, struct txn *,
+			    struct mpage *);
 extern void		 pm_page_unlock(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_delete(pg_mgr_t *, struct mpage *);
 extern void		 pm_page_mark_dirty(pg_mgr_t *, struct mpage *);

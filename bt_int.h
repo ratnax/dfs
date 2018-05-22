@@ -119,7 +119,7 @@ struct btree {
 extern bool		 bt_page_isvalid(struct mpage *mp);
 extern void		 bt_page_mark_dirty(struct mpage *mp);
 extern void		 bt_page_rdlock(struct mpage *mp);
-extern void		 bt_page_wrlock(struct mpage *mp);
+extern int		 bt_page_wrlock(struct txn *tx, struct mpage *mp);
 extern void		 bt_page_unlock(struct mpage *mp);
 extern void		 bt_page_free(struct txn *tx, struct mpage *mp);
 extern void		 bt_page_put(struct mpage *mp);

@@ -108,6 +108,7 @@ __page_init(pg_mgr_t *pm, struct page *pg, uint64_t pgno, uint32_t size)
 	pg->count = 0;
 	pg->size = size;
 	pg->mop = NULL;
+	pg->tx = NULL;
 	pthread_mutex_init(&pg->iolock, NULL);
 	pthread_rwlock_init(&pg->lock, NULL);
 	pg->readers = pg->writers = 0;
@@ -292,11 +293,13 @@ __page_rdlock(pg_mgr_t *pm, struct page *pg)
 	__sync_fetch_and_add(&pg->readers, 1);
 }
 
-static void
+static bool 
 __page_unlock(pg_mgr_t *pm, struct page *pg)
 {
+	bool ret = false;
 	if (pg->writers) {
 		pg->writers--;
+		ret = true;
 		assert(pg->writers == 0);
 	} else {
 		assert(pg->readers);
@@ -304,6 +307,7 @@ __page_unlock(pg_mgr_t *pm, struct page *pg)
 		assert(pg->readers >= 0);
 	}
 	pthread_rwlock_unlock(&pg->lock);
+	return ret;
 }
 
 static int
@@ -455,10 +459,17 @@ pm_page_rdlock(pg_mgr_t *pm, struct mpage *mp)
 	__page_rdlock(pm, MPG2PG(mp));
 }
 
-void
-pm_page_wrlock(pg_mgr_t *pm, struct mpage *mp)
+int
+pm_page_wrlock(pg_mgr_t *pm, struct txn *tx, struct mpage *mp)
 {
-	__page_wrlock(pm, MPG2PG(mp), true);
+	struct page *pg = MPG2PG(mp);
+	int ret;
+
+	if ((ret = txn_reserve(tx)))
+		return ret;
+	__page_wrlock(pm, pg, true);
+	pg->tx = tx;
+	return 0;
 }
 
 void
@@ -470,10 +481,15 @@ pm_page_wrlock_nocow(pg_mgr_t *pm, struct mpage *mp)
 void 
 pm_page_unlock(pg_mgr_t *pm, struct mpage *mp)
 {
-	__page_unlock(pm, MPG2PG(mp));
+	struct page *pg = MPG2PG(mp);
+	struct txn *tx = pg->tx;
+
+	pg->tx = NULL;
+	if (__page_unlock(pm, pg) && tx)
+		txn_unreserve(tx);
 }
 
-static void * syncer(void *arg)
+static void *syncer(void *arg)
 {
 	pg_mgr_t *pm = (pg_mgr_t *) arg;
 	struct page *pg;
@@ -539,13 +555,12 @@ struct pginfo {
 
 struct pgop {
 	uint8_t type;
-	uin8_t npg;
+	uint8_t npg;
 	struct pginfo pgi[0];
-};
+} __attribute ((packed));
 
 int
-pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
-    int npg_topin, char *fmt, ...)
+pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, size_t len, int npg, int npg_topin,	    ...)
 {
 	int ret;
 	struct  page *pg1;
@@ -565,10 +580,12 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 	struct dpage *pin_dp1;
 	struct  page *pin_pg1;
 
+	struct pgop *p;
+	size_t n;
 
 	va_list valist;
 
-	va_start(valist, fmt);
+	va_start(valist, npg_topin);
 	switch (npg) {
 	case 1:
 		mp1 = va_arg(valist, struct mpage *);
@@ -577,21 +594,14 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 
 		switch (npg_topin) {
 		case 0:
-			struct pgop *p;
-			size_t n = sizeof(struct pgop);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
+			n = sizeof(struct pgop);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
 			p->npg = npg_topin;
-			ret = txn_log_op(tx, data, len, p, n, 1, pg1->pgno,
-			    &dp1->lsn, &pg1->mops);
+			ret = txn_log_op(tx, len + n, 1, pg1->pgno, &dp1->lsn,
+			    &pg1->mops);
 			break;
 		case 1:
-			struct pgop *p;
-			size_t n = sizeof(struct pgop) + sizeof(struct pginfo);
-
 			pin_mp1 = va_arg(valist, struct mpage *);
 			pin_pg1 = MPG2PG(pin_mp1);
 			pin_dp1 = pin_pg1->dp;
@@ -600,12 +610,15 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 			pin_pg1->count++;
 			pthread_mutex_unlock(&pm->lock);
 
+			n = sizeof(struct pgop) + sizeof(struct pginfo);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
+			p->npg = npg_topin;
 			p->pgi[0].pgno = pin_pg1->pgno;
 			p->pgi[0].lsn = pin_dp1->lsn;
 
-			ret = txn_log_op(tx, data, len, p, n, 1, pg1->pgno,
-			    &dp1->lsn, &pg1->mops);
+			ret = txn_log_op(tx, len + n, 1, pg1->pgno, &dp1->lsn, 
+			    &pg1->mops);
 			break;
 		default:
 			assert(0);
@@ -623,25 +636,14 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 
 		switch (npg_topin) {
 		case 0:
-			struct pgop *p;
-			size_t n = sizeof(struct pgop);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
+			n = sizeof(struct pgop);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
 			p->npg = npg_topin;
-			ret = txn_log_op(tx, data, len, p, n, 2, pg1->pgno, 
-			    &dp1->lsn, &pg1->mops, pg2->pgno, &dp2->lsn,
-			    &pg2->mops)
+			ret = txn_log_op(tx, len + n, 2, pg1->pgno, &dp1->lsn,
+			    &pg1->mops, pg2->pgno, &dp2->lsn, &pg2->mops);
 			break;
 		case 1:    
-			struct pgop *p;
-			size_t n = sizeof(struct pgop) + sizeof(struct pginfo);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
 			pin_mp1 = va_arg(valist, struct mpage *);
 			pin_pg1 = MPG2PG(pin_mp1);
 			pin_dp1 = pin_pg1->dp;
@@ -650,13 +652,14 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 			pin_pg1->count++;
 			pthread_mutex_unlock(&pm->lock);
 
+			n = sizeof(struct pgop) + sizeof(struct pginfo);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
+			p->npg = npg_topin;
 			p->pgi[0].pgno = pin_pg1->pgno;
 			p->pgi[0].lsn = pin_dp1->lsn;
-
-			ret = txn_log_op(tx, data, len, p, n, 2, pg1->pgno,
-			    &dp1->lsn, &pg1->mops, pg2->pgno, &dp2->lsn,
-			    &pg2->mops);
+			ret = txn_log_op(tx, len + n, 2, pg1->pgno, &dp1->lsn,
+			    &pg1->mops, pg2->pgno, &dp2->lsn, &pg2->mops);
 			break;
 		default:
 			assert(0);
@@ -677,25 +680,15 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 
 		switch(npg_topin) {
 		case 0:
-			struct pgop *p;
-    			size_t n = sizeof(struct pgop);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
+    			n = sizeof(struct pgop);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
 			p->npg = npg_topin;
-	    		ret = txn_log_op(tx, data, len, p, n, 3, pg1->pgno, 
-			    &dp1->lsn, &pg1->mops, pg2->pgno, &dp2->lsn,
-			    &pg2->mops, pg3->pgno, &dp3->lsn, &pg3->mops);
+	    		ret = txn_log_op(tx, len + n, 3, pg1->pgno, &dp1->lsn,
+			    &pg1->mops, pg2->pgno, &dp2->lsn, &pg2->mops,
+			    pg3->pgno, &dp3->lsn, &pg3->mops);
 			break;
 		case 1:
-			struct pgop *p;
-			size_t n = sizeof(struct pgop) + sizeof(struct pginfo);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
 			pin_mp1 = va_arg(valist, struct mpage *);
 			pin_pg1 = MPG2PG(pin_mp1);
 			pin_dp1 = pin_pg1->dp;
@@ -704,13 +697,15 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 			pin_pg1->count++;
 			pthread_mutex_unlock(&pm->lock);
 
+			n = sizeof(struct pgop) + sizeof(struct pginfo);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
+			p->npg = npg_topin;
 			p->pgi[0].pgno = pin_pg1->pgno;
 			p->pgi[0].lsn = pin_dp1->lsn;
-
-	    		ret = txn_log_op(tx, data, len, p, n, 3, pg1->pgno,
-			    &dp1->lsn, &pg1->mops, pg2->pgno, &dp2->lsn,
-			    &pg2->mops, pg3->pgno, &dp3->lsn, &pg3->mops);
+	    		ret = txn_log_op(tx, len + n, 3, pg1->pgno, &dp1->lsn,
+			    &pg1->mops, pg2->pgno, &dp2->lsn, &pg2->mops,
+			    pg3->pgno, &dp3->lsn, &pg3->mops);
 			break;
 		default:
 			assert(0);
@@ -735,26 +730,16 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 
 		switch (npg_topin) {
 		case 0:
-			struct pgop *p;
-    			size_t n = sizeof(struct pgop);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
+    			n = sizeof(struct pgop);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
 			p->npg = npg_topin;
-			ret = txn_log_op(tx, data, len, p, n, 4, pg1->pgno,
-			    &dp1->lsn, &pg1->mops, pg2->pgno, &dp2->lsn,
-			    &pg2->mops, pg3->pgno, &dp3->lsn, &pg3->mops,
-			    pg4->pgno, &dp4->lsn, &pg4->mops);
+			ret = txn_log_op(tx, len + n, 4, pg1->pgno, &dp1->lsn,
+			    &pg1->mops, pg2->pgno, &dp2->lsn, &pg2->mops,
+			    pg3->pgno, &dp3->lsn, &pg3->mops, pg4->pgno,
+			    &dp4->lsn, &pg4->mops);
 			break;
 		case 1:
-			struct pgop *p;
-			size_t n = sizeof(struct pgop) + sizeof(struct pginfo);
-
-			if (!(p = malloc(len)))
-				return -ENOMEM;
-
 			pin_mp1 = va_arg(valist, struct mpage *);
 			pin_pg1 = MPG2PG(pin_mp1);
 			pin_dp1 = pin_pg1->dp;
@@ -763,14 +748,17 @@ pm_txn_log_op(pg_mgr_t *pm, struct txn *tx, void *data, size_t len, int npg,
 			pin_pg1->count++;
 			pthread_mutex_unlock(&pm->lock);
 
+			n = sizeof(struct pgop) + sizeof(struct pginfo);
+			p = txn_mem_alloc(tx, n);
 			p->type = pm->type;
+			p->npg = npg_topin;
 			p->pgi[0].pgno = pin_pg1->pgno;
 			p->pgi[0].lsn = pin_dp1->lsn;
 
-			ret = txn_log_op(tx, data, len, p, n, 4, pg1->pgno, 
-			    &dp1->lsn, &pg1->mops, pg2->pgno, &dp2->lsn,
-			    &pg2->mops, pg3->pgno, &dp3->lsn, &pg3->mops,
-			    pg4->pgno, &dp4->lsn, &pg4->mops);
+			ret = txn_log_op(tx, len + n, 4, pg1->pgno, &dp1->lsn,
+			    &pg1->mops, pg2->pgno, &dp2->lsn, &pg2->mops,
+			    pg3->pgno, &dp3->lsn, &pg3->mops, pg4->pgno,
+			    &dp4->lsn, &pg4->mops);
 			break;
 		default:
 			assert(0);
@@ -804,6 +792,7 @@ pm_alloc(pm_type_t type, size_t mp_sz, init_mpage_t init_cb,
 	pm->exit_mpage = exit_cb;
 	pm->type = type;
 	pm->max_nlru = max_nlru;
+	pm->nlru = 0;
 	pm->mp_sz = mp_sz;
 	pm->active = true;
 

@@ -125,8 +125,8 @@ __lookup_leaf(BTREE *t, struct mpage *mp, const DBT *key, indx_t *indxp)
  * @pmp & @gmp are unlocked and released on failure return.
  */
 static struct mpage *
-__lookup_parent_nowait(BTREE *t, struct mpage *gmp, struct mpage *pmp, 
-    const DBT *key, indx_t *indxp)
+__lookup_parent_nowait(BTREE *t, struct mpage *gmp,
+    struct mpage *pmp, const DBT *key, indx_t *indxp)
 {
 	struct mpage *mp;
 	pgno_t pgno;
@@ -211,7 +211,8 @@ struct mpage *__bt_get_md(void)
  * @mp and @pmp are unlocked and released on failure return.
  */
 static int
-__wait_on_reorg(struct mpage *mp, struct mpage *pmp, bool rel_on_success)
+__wait_on_reorg(struct mpage *mp, struct mpage *pmp,
+    bool rel_on_success)
 {
 	bool reorging;
 
@@ -237,7 +238,7 @@ __wait_on_reorg(struct mpage *mp, struct mpage *pmp, bool rel_on_success)
 }
 
 static struct mpage *
-__bt_get_leaf_trylocked(BTREE *t, const DBT *key, bool excl)
+__bt_get_leaf_trylocked(BTREE *t, struct txn *tx, const DBT *key, bool excl)
 {
 	struct mpage *mp, *pmp = NULL;
 	indx_t indx;
@@ -263,7 +264,7 @@ __bt_get_leaf_trylocked(BTREE *t, const DBT *key, bool excl)
 				return mp;
 			}
 			bt_page_unlock(mp);
-			bt_page_wrlock(mp);
+			bt_page_wrlock(tx, mp);
 			if ((err = __wait_on_reorg(mp, pmp, true)))
 				return ERR_PTR(err);
 			return mp;
@@ -278,32 +279,32 @@ __bt_get_leaf_trylocked(BTREE *t, const DBT *key, bool excl)
 }
 
 static struct mpage *
-__bt_get_leaf_locked(BTREE *t, const DBT *key, bool excl)
+__bt_get_leaf_locked(BTREE *t, struct txn *tx, const DBT *key, bool excl)
 {
 	struct mpage *mp;
 
 	do {
-		mp = __bt_get_leaf_trylocked(t, key, excl);
+		mp = __bt_get_leaf_trylocked(t, tx, key, excl);
 	} while (IS_ERR(mp) && PTR_ERR(mp) == -EAGAIN);
 	return mp;
 }
 
 static struct mpage *
-__bt_get_leaf_excl(BTREE *t, const DBT *key)
+__bt_get_leaf_excl(BTREE *t, struct txn *tx, const DBT *key)
 {
-	return __bt_get_leaf_locked(t, key, true);
+	return __bt_get_leaf_locked(t, tx, key, true);
 }
 
 static struct mpage *
 __bt_get_leaf_shared(BTREE *t, const DBT *key)
 {
-	return __bt_get_leaf_locked(t, key, false);
+	return __bt_get_leaf_locked(t, NULL, key, false);
 }
 
 /* cmp has to be held by a flag like REORG */
 static struct mpage * 
-__bt_get_parent_trylocked(BTREE *t, struct mpage *cmp, DBT *key,
-    indx_t *indxp, bool excl)
+__bt_get_parent_trylocked(BTREE *t, struct txn *tx, struct mpage *cmp,
+    DBT *key, indx_t *indxp, bool excl)
 {
 	struct mpage *mp, *gmp, *pmp;
 	pgno_t pgno;
@@ -316,7 +317,7 @@ __bt_get_parent_trylocked(BTREE *t, struct mpage *cmp, DBT *key,
 	if (gmp->dp->root_pgno == cmp->pgno) { 
 		if (excl) {
 			bt_page_unlock(gmp);
-			bt_page_wrlock(gmp);
+			bt_page_wrlock(tx, gmp);
 		}
 		return gmp;
 	} 
@@ -339,7 +340,7 @@ __bt_get_parent_trylocked(BTREE *t, struct mpage *cmp, DBT *key,
 			bt_page_unlock(pmp);
 			bt_page_put(mp);
 
-			bt_page_wrlock(pmp);
+			bt_page_wrlock(tx, pmp);
 			if ((err = __wait_on_reorg(pmp, gmp, true)))
 				return ERR_PTR(err);
 			pgno = __lookup_internal(t, pmp, key, indxp);
@@ -360,7 +361,8 @@ __bt_get_parent_trylocked(BTREE *t, struct mpage *cmp, DBT *key,
 }
 
 static struct mpage * 
-__bt_get_parent_locked(BTREE *t, struct mpage *cmp, indx_t *indxp, bool excl)
+__bt_get_parent_locked(BTREE *t, struct txn *tx, struct mpage *cmp,
+    indx_t *indxp, bool excl)
 {
 	struct mpage *mp;
 	char key_mem[DP_MAX_KSIZE];
@@ -385,21 +387,21 @@ __bt_get_parent_locked(BTREE *t, struct mpage *cmp, indx_t *indxp, bool excl)
 	bt_page_unlock(cmp); 
 
 	do {
-		mp = __bt_get_parent_trylocked(t, cmp, &key, indxp, excl);
+		mp = __bt_get_parent_trylocked(t, tx, cmp, &key, indxp, excl);
 	} while (IS_ERR(mp) && PTR_ERR(mp) == -EAGAIN);
 	return mp;
 }
 
 static struct mpage * 
-__bt_get_parent_excl(BTREE *t, struct mpage *cmp, indx_t *indxp)
+__bt_get_parent_excl(BTREE *t, struct txn *tx, struct mpage *cmp, indx_t *indxp)
 {
-	return __bt_get_parent_locked(t, cmp, indxp, true);
+	return __bt_get_parent_locked(t, tx, cmp, indxp, true);
 }
 
 static struct mpage * 
 __bt_get_parent_shared(BTREE *t, struct mpage *cmp, indx_t *indxp)
 {
-	return __bt_get_parent_locked(t, cmp, indxp, false);
+	return __bt_get_parent_locked(t, NULL, cmp, indxp, false);
 }
 
 static int
@@ -703,7 +705,7 @@ __bt_psplit(struct txn *tx, BTREE *t, struct mpage *mp,
 	rmp = bt_page_new(tx, size);
 	assert(rmp);
 
-	bt_page_wrlock(lmp);
+	bt_page_wrlock(tx, lmp);
 	lmp->state = MP_STATE_NORMAL;
 	if (lmp->size != size) {
 		free(lmp->dp);
@@ -754,7 +756,7 @@ __bt_psplit(struct txn *tx, BTREE *t, struct mpage *mp,
 	bt_page_mark_dirty(lmp);
 	bt_page_unlock(lmp);
 
-	bt_page_wrlock(rmp);
+	bt_page_wrlock(tx, rmp);
 	rmp->state = MP_STATE_NORMAL;
 	if (rmp->size != size) {
 		free(rmp->dp);
@@ -797,8 +799,8 @@ __bt_psplit(struct txn *tx, BTREE *t, struct mpage *mp,
 }
 
 static void
-__bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, struct mpage *lmp,
-    struct mpage *rmp)
+__bt_root(BTREE *t, struct txn *tx, struct mpage *mp, struct mpage *pmp,
+    struct mpage *lmp, struct mpage *rmp)
 {
 	struct dpage *ldp, *rdp, *pdp;
 	uint32_t nbytes;
@@ -809,7 +811,7 @@ __bt_root(BTREE *t, struct mpage *mp, struct mpage *pmp, struct mpage *lmp,
 	rdp = rmp->dp;
 	ldp = lmp->dp;
 
-	bt_page_wrlock(pmp);
+	bt_page_wrlock(tx, pmp);
 	pmp->state = MP_STATE_NORMAL;
 	if (pmp->size != PAGE_SIZE) {
 		free(pmp->dp);
@@ -932,7 +934,7 @@ bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
 	bool exact, extended;
 	int err;
 
-	mp = __bt_get_leaf_excl(t, key);
+	mp = __bt_get_leaf_excl(t, tx, key);
 	if (IS_ERR(mp)) 
 		return PTR_ERR(mp);
 	
@@ -946,7 +948,7 @@ bt_put(struct txn *tx, BTREE *t, const DBT *key, const DBT *val)
 		err = __bt_reorg_split(tx, t, mp);			
 		assert(err == 0);
 		bt_page_put(mp);
-		mp = __bt_get_leaf_excl(t, key);
+		mp = __bt_get_leaf_excl(t, tx, key);
 		if (IS_ERR(mp)) 
 			return PTR_ERR(mp);
 	}
@@ -976,7 +978,7 @@ bt_del(struct txn *tx, BTREE *t, const DBT *key)
 	bool exact, empty = false;
 	int err = 0;
 
-	mp = __bt_get_leaf_excl(t, key);
+	mp = __bt_get_leaf_excl(t, tx, key);
 	if (IS_ERR(mp)) 
 		return PTR_ERR(mp);
 	exact = __lookup_leaf(t, mp, key, &indx);
@@ -1008,7 +1010,7 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 	assert(!err);
 
 	new_root = NULL;
-	pmp = __bt_get_parent_excl(t, mp, &indx);
+	pmp = __bt_get_parent_excl(t, tx, mp, &indx);
 	if (IS_ERR(pmp)) {
 		assert(0);
 		return PTR_ERR(pmp);
@@ -1021,8 +1023,8 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 			assert(0);
 			return PTR_ERR(new_root);
 		}
-		__bt_root(t, mp, new_root, lmp, rmp);
-		bt_page_wrlock(pmp);
+		__bt_root(t, tx, mp, new_root, lmp, rmp);
+		bt_page_wrlock(tx, pmp);
 		pmp->dp->root_pgno = new_root->pgno;
 		bt_page_mark_dirty(pmp);
 
@@ -1041,7 +1043,7 @@ __bt_split(struct txn *tx, BTREE *t, struct mpage *mp)
 			err = __bt_reorg_split(tx, t, pmp);
 			assert(err == 0);
 			bt_page_put(pmp);
-			pmp = __bt_get_parent_excl(t, mp, &indx);
+			pmp = __bt_get_parent_excl(t, tx, mp, &indx);
 			if (IS_ERR(pmp)) 
 				return PTR_ERR(pmp);
 		}
@@ -1077,13 +1079,13 @@ __bt_delete(struct txn *tx, BTREE *t, struct mpage *mp)
 	bool empty;
 	int err;
 
-	pmp = __bt_get_parent_excl(t, mp, &indx);
+	pmp = __bt_get_parent_excl(t, tx, mp, &indx);
 	if (IS_ERR(pmp))
 		return pmp;
 	if (MP_ISMETADATA(pmp)) {
 		bt_page_unlock(pmp);
 		bt_page_put(pmp);
-		bt_page_wrlock(mp);
+		bt_page_wrlock(tx, mp);
 		dp = mp->dp;
 		dp->flags &= ~DP_INTERNAL;
 		dp->flags |= DP_LEAF;
@@ -1174,7 +1176,7 @@ __bt_reorg(struct txn *tx, BTREE *t, struct mpage *mp)
 	indx_t indx;
 	int err;
 
-	bt_page_wrlock(mp);
+	bt_page_wrlock(tx, mp);
 	if (!MP_PREREORG(mp)) {
 		bt_page_unlock(mp);
 		return 0;

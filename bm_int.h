@@ -53,7 +53,7 @@ struct mpage {
 
 extern void		 bm_page_mark_dirty(struct mpage *mp);
 extern void		 bm_page_rdlock(struct mpage *mp);
-extern void		 bm_page_wrlock(struct mpage *mp);
+extern int		 bm_page_wrlock(struct txn *tx, struct mpage *mp);
 extern void		 bm_page_wrlock_nocow(struct mpage *mp);
 extern void		 bm_page_unlock(struct mpage *mp);
 extern struct mpage	*bm_page_get_nocow(pgno_t pgno);
