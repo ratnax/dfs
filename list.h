@@ -230,6 +230,8 @@ static inline void list_splice(const struct list_head *list,
 #define list_first_entry(ptr, type, member) \
 	list_entry((ptr)->next, type, member)
 
+#define list_last_entry(ptr, type, member) \
+	list_entry((ptr)->prev, type, member)
 
 #define list_for_each_entry(pos, head, member)				\
 	for (pos = list_first_entry(head, __typeof__(*pos), member);	\

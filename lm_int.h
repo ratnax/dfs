@@ -14,26 +14,29 @@
 #define SECT_SIZE		(1U << SECT_SHFT)
 #define SECT_MASK		(SECT_SIZE - 1)
 
-typedef uint8_t log_mrkr_t;
-typedef uint8_t log_coff_t;
+typedef uint8_t sect_mrkr_t;
+typedef uint8_t sect_coff_t;
+typedef uint8_t sect_flgs_t;
 
 struct sect_dlm {
-	log_mrkr_t  mrkr;
-	log_coff_t  coff;
-};
+	sect_mrkr_t  mrkr;
+	sect_flgs_t  flgs;
+	sect_coff_t  coff[2];
+} __attribute ((packed));
 
-#define LOG_MRKR_SHFT		(sizeof (log_mrkr_t) << 3)
-#define LOG_COFF_SHFT		(sizeof (log_coff_t) << 3)
+#define SECT_FLAG_HDR		(1)
+#define LOG_MRKR_SHFT		(sizeof (sect_mrkr_t) << 3)
+#define LOG_COFF_SHFT		(sizeof (sect_coff_t) << 3)
 
 #define LOG_ALIGN_SHFT		((SECT_SHFT > LOG_COFF_SHFT) ?	\
 				 (SECT_SHFT - LOG_COFF_SHFT) : 0)
 #define LOG_ALIGN_SIZE		(1U << LOG_ALIGN_SHFT)
 #define LOG_ALIGN_MASK		(LOG_ALIGN_SIZE - 1)
 
-#define LOG_MRKR_INIT		((log_mrkr_t) 0)
-#define LOG_MRKR_PSWITCH(m)	((log_mrkr_t) (~(m)))	/* partial switch */	
+#define LOG_MRKR_INIT		((sect_mrkr_t) 0)
+#define LOG_MRKR_PSWITCH(m)	((sect_mrkr_t) (~(m)))	/* partial switch */	
 #define LOG_MRKR_FSWITCH(m)	((m) ^			/* full switch */   \
-				(((log_mrkr_t) ~0) >> (LOG_MRKR_SHFT >> 1)))
+				(((sect_mrkr_t) ~0) >> (LOG_MRKR_SHFT >> 1)))
 
 #define SECT_DLM_SIZE		(sizeof (struct sect_dlm))
 
@@ -44,27 +47,34 @@ struct sect_dlm {
 #define LOG_MAX_IOV		(1024)
 
 struct lm_log_t {
-	loff_t	 off;			/* next log offset to write to */
-	loff_t	 coff;			/* commit offset */
-	loff_t	 base_offset;
-	size_t	 size;
-	uint8_t  mrkr;
-	struct	 sect_dlm psh[2];	/* partial sector headers.  */
-	struct	 sect_dlm pst[2];	/* partial sector trailers. */
-	struct	 sect_dlm fsh;		/* full sector header */
-	struct	 sect_dlm fst;		/* full sector trailer */
-	uint8_t  pshi;			/* index into psh above */
-	uint8_t  psti;			/* index into pst above */
-	int	 fd;
-	int	 commit_count;
-	size_t	 lsh_iovidx;		/* last sector header iovidx */
-	size_t	 fst_iovidx;		/* first sector trailer iovidx */	
-	size_t	 iovmax;
-	size_t	 iovidx;
-	struct	 iovec *iov;
-	void	*sect;
-	void	*zero_sect;
-	void	*mmaped_addr;
-	struct	 list_head list;
+	size_t		 size;
+	size_t		 size_avail;
+	size_t		 part_size;
+	uint8_t		 mrkr;
+	int		 fd;
+	loff_t		 base_offset;
+	int		 commit_count;
+	void		*zero_sect;
+	void		*mmaped_addr;
+	struct list_head list;
+};
+
+struct lg_blk_t {
+    	loff_t		 off;		/* next log offset to write to */
+	loff_t		 coff;		/* commit offset */
+	struct sect_dlm	 ps_dlm[2];	/* partial sector headers.  */
+	struct sect_dlm	 fs_dlm;		/* full sector header */
+	uint8_t		 flags;
+	uint8_t		 psi;		/* index into psh above */
+	size_t		 lsh_iovidx;	/* last sector header iovidx */
+	size_t		 fst_iovidx;	/* first sector trailer iovidx */	
+	size_t		 iovmax;
+	size_t		 iovidx;
+	size_t		 nreserved;
+	uint64_t	 seqno;
+	struct iovec	*iov;
+	void		*sect;
+	lm_log_t	*lg;
+	struct list_head lbs;
 };
 #endif
