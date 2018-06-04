@@ -72,6 +72,7 @@ struct lg_blk_t {
 	size_t		 iovidx;
 	size_t		 nreserved;
 	uint64_t	 seqno;
+	uint64_t	 cid;
 	struct iovec	*iov;
 	void		*sect;
 	lm_log_t	*lg;
