@@ -59,12 +59,24 @@ struct lm_log_t {
 	struct list_head list;
 };
 
+typedef enum { 
+	LB_STATE_NOIO,
+	LB_STATE_DOIO,
+	LB_STATE_INIO,
+	LB_STATE_DOSYNC,
+} lb_state_t;
+
+#define LB_FLAG_DIRTY	0x1
+#define LB_FLAG_FINISH	0x2
+#define LB_FLAG_FORKED	0x4
+
 struct lg_blk_t {
     	loff_t		 off;		/* next log offset to write to */
 	loff_t		 coff;		/* commit offset */
 	struct sect_dlm	 ps_dlm[2];	/* partial sector headers.  */
 	struct sect_dlm	 fs_dlm;		/* full sector header */
 	uint8_t		 flags;
+	lb_state_t	 state;
 	uint8_t		 psi;		/* index into psh above */
 	size_t		 lsh_iovidx;	/* last sector header iovidx */
 	size_t		 fst_iovidx;	/* first sector trailer iovidx */	
