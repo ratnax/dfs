@@ -67,7 +67,7 @@ typedef enum {
 } lb_state_t;
 
 #define LB_FLAG_DIRTY	0x1
-#define LB_FLAG_FINISH	0x2
+#define LB_FLAG_FULL	0x2
 #define LB_FLAG_FORKED	0x4
 
 struct lg_blk_t {
@@ -83,6 +83,8 @@ struct lg_blk_t {
 	size_t		 iovmax;
 	size_t		 iovidx;
 	size_t		 nreserved;
+	int		 err;
+	uint64_t	 io_no;
 	uint64_t	 seqno;
 	uint64_t	 cid;
 	struct iovec	*iov;
