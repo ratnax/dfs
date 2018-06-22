@@ -102,7 +102,6 @@ struct pgop_blkop {
 
 struct pgdop_info {
 	uint64_t pgno;
-	uint64_t lsn;
 	uint64_t prev_lsn;
 };
 
@@ -112,8 +111,9 @@ struct pgmop_info {
 };
 
 struct pgdop {
-	uint64_t		txid;	
+	lr_hdr_t		lrh;
 	uint16_t		npg;
+	uint64_t		txid;	
 	struct pgdop_info	pginfo[0];
 } __attribute__ ((packed));
 

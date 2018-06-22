@@ -3,25 +3,33 @@
 
 typedef struct lm_log_t lm_log_t;
 typedef struct lg_blk_t lg_blk_t;
-typedef struct lg_idx_t lg_idx_t;
+typedef struct lm_idx_t lm_idx_t;
+typedef struct lb_rec_t lb_rec_t;
+typedef struct lr_hdr_t lr_hdr_t;
 
-struct lg_idx_t {
+struct lm_idx_t {
+	lm_log_t *lg;
 	loff_t off;
-	size_t iovidx;
-	lg_blk_t *lb;
 };
 
-typedef size_t	(*lm_rcb_t)(void *buf, size_t size, int idx, void *arg);
+struct lr_hdr_t {
+	uint64_t	lsn;
+	uint16_t	len;
+} __attribute ((packed));
+
+struct lb_rec_t {
+	lr_hdr_t	hdr;
+	uint8_t		data[0];
+} __attribute ((packed));
+
+typedef size_t	(*lm_rcb_t)(void *buf, size_t size, void *arg);
 
 extern size_t	 log_space_available(lm_log_t *);
 extern int	 log_write(lm_log_t *, void *, size_t);
 extern int	 log_writev(lm_log_t *, struct iovec *, size_t, size_t);
 extern int	 log_put(lm_log_t *);
-extern int	 lm_reserve(lg_idx_t *, size_t);
-extern int	 lm_reservev(lg_idx_t *, struct iovec *, size_t, size_t);
-extern lm_log_t *lm_write(lg_idx_t *, void *, size_t);
-extern lm_log_t *lm_writev(lg_idx_t *, struct iovec *, size_t, size_t);
-extern int	 lm_commit(void);
+extern int	 lm_write(void *data, size_t size, lm_idx_t *);
+extern int	 lm_commit(lm_log_t *lg, loff_t off);
 extern int	 log_commit(lm_log_t *);
 extern int	 log_finish(lm_log_t *);
 extern int	 log_recover(lm_log_t *, void *, size_t, int, lm_rcb_t, void *);
