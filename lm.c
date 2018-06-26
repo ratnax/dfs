@@ -4,17 +4,19 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
-static uint64_t lgblk_seqno;
-static struct list_head lbs_list;
-static struct list_head log_list;
-static struct list_head full_log_list;
-static pthread_cond_t	lg_cond = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t	lb_cond = PTHREAD_COND_INITIALIZER;
-static pthread_mutex_t	lg_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t	lb_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t			 log_seqno;
+static struct list_head		 lbs_list;
+static struct list_head		 log_list;
+static struct list_head		 full_log_list;
+static pthread_cond_t		 lg_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t		 lb_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t		 lg_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t		 lb_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t		 flush_cond = PTHREAD_COND_INITIALIZER;
 static struct io_context	*io_ctxt; 
 
-static void __put_sect_coff(lm_log_t *lg, struct sect_dlm *dlm, loff_t coff)
+static inline 
+void __put_sect_coff(lm_log_t *lg, struct sect_dlm *dlm, loff_t coff)
 {
 	// assert((coff & LOG_ALIGN_MASK) == 0);
 	if (lg->logid == 0) {
@@ -26,7 +28,7 @@ static void __put_sect_coff(lm_log_t *lg, struct sect_dlm *dlm, loff_t coff)
 	}
 }
 
-static loff_t __get_sect_coff(lm_log_t *lg, struct sect_dlm *dlm)
+static inline loff_t __get_sect_coff(lm_log_t *lg, struct sect_dlm *dlm)
 {
 	if (lg->logid == 0)
 		return dlm->coff[0] << LOG_ALIGN_SHFT;
@@ -34,13 +36,12 @@ static loff_t __get_sect_coff(lm_log_t *lg, struct sect_dlm *dlm)
 		return dlm->coff[1] << LOG_ALIGN_SHFT;
 }
 
-static struct sect_dlm *__lb_next_ps_dlm(lg_blk_t *lb)
+static inline struct sect_dlm *__lb_next_ps_dlm(lg_blk_t *lb)
 {
 	return &lb->ps_dlm[1 & lb->psi++];
 }
 
-/* Initialize full sector header and tailer. */
-static void __lb_init_fs_mrkrs(lg_blk_t *lb)
+static inline void __lb_init_fs_mrkrs(lg_blk_t *lb)
 {
 	lb->fs_dlm.logid = lb->lg->logid;
 	lb->fs_dlm.seqno = 0;
@@ -221,15 +222,15 @@ static void __lb_remove(lg_blk_t *lb, bool isfull)
 
 static void __lb_commit_finish(lg_blk_t *lb)
 {
-	size_t sect_off;
+	size_t mod_off;
 
-	if (lb->flags & (LB_FLAG_FULL|LB_FLAG_FORKED)) { 
-		__lb_remove(lb, lb->flags & LB_FLAG_FULL);
+	if (__is_todel(lb)) {
+		__lb_remove(lb, __is_full(lb));
 		return;
 	} 
-	sect_off = lb->off & SECT_MASK;
-	if (lb->flags & LB_FLAG_ALIGNEDIO && sect_off) {
-		lb->coff = lb->off & ~SECT_MASK;
+	mod_off = __sect_mod(lb->off);
+	if (__is_aio(lb) && mod_off) {
+		lb->coff = __sect_floor(lb->off);
 		lb->flags = LB_FLAG_NOHDR;
 		lb->iovidx = lb->iovidx - lb->lsh_iovidx;
 		memmove(lb->iovecs, lb->iovecs + lb->lsh_iovidx,
@@ -238,7 +239,7 @@ static void __lb_commit_finish(lg_blk_t *lb)
 		void *sect = lb->lg->sect;
 		int i;
 
-		if (sect_off) {
+		if (mod_off) {
 			for (i = lb->lsh_iovidx; i < lb->iovidx; i++) {
 				if (lb->iovecs[i].iov_base != sect) {
 					memmove(sect, lb->iovecs[i].iov_base,
@@ -249,7 +250,7 @@ static void __lb_commit_finish(lg_blk_t *lb)
 			assert(sect < lb->lg->sect + SECT_SIZE);
 
 			lb->iovecs[0].iov_base = lb->lg->sect;
-			lb->iovecs[0].iov_len = sect_off;
+			lb->iovecs[0].iov_len = mod_off;
 			lb->iovidx = 1;
 			lb->flags = LB_FLAG_NOHDR;
 		} else {
@@ -265,130 +266,125 @@ static void __lb_commit_finish(lg_blk_t *lb)
 	return;
 }
 
-/* coff != off */
-static int __lb_commit(lg_blk_t *lb, size_t iovidx, loff_t coff, loff_t off)
-{
-	lm_log_t *lg = lb->lg;
-	struct sect_dlm *dlm;
-	struct iovec *iov = lb->iovecs; 
-	loff_t sect_coff, sect_off;
-
-	assert(lb->coff != lb->off);
-	sect_coff = coff & SECT_MASK;
-	sect_off = off & SECT_MASK;
-	if (sect_coff) {
-		dlm = iov[0].iov_base;
-		dlm->seqno++;
-	} else {
-		dlm = __lb_next_ps_dlm(lb);
-		dlm->logid = lg->logid;
-		dlm->seqno = 0;
-		if (lb->flags & LB_FLAG_NOHDR)
-			dlm->flags = 0;
-		else
-			dlm->flags = SECT_FLAG_HDR;
-		iov[0].iov_base = dlm;
-	}
-	if ((coff >> SECT_SHFT) == (off >> SECT_SHFT)) { 
-		goto last;
-	} else {
-		__put_sect_coff(lg, dlm, SECT_TLR_OFFSET);
-		iov[lb->fst_iovidx].iov_base = dlm;
-	}
-    	if (sect_off) {
-		dlm = __lb_next_ps_dlm(lb);
-		dlm->logid = lg->logid;
-		dlm->seqno = 0;
-		dlm->flags = 0;
-		iov[lb->lsh_iovidx].iov_base = dlm;
-last:
-		__put_sect_coff(lg, dlm, sect_off);
-
-	    	iov[iovidx].iov_base = lg->zero_sect;
-	       	iov[iovidx++].iov_len = SECT_TLR_OFFSET - sect_off;
-	
-		iov[iovidx].iov_base = dlm;
-		iov[iovidx++].iov_len = SECT_DLM_SIZE;
-	}
-	assert(iovidx <= lb->iovmax);
-	return iovidx;
-}
-
 static void __lb_write_complete(lg_blk_t *lb, size_t bwrote)
 {
 	assert(lb->io_size == bwrote);
+	pthread_mutex_lock(&lb_lock);
 	if (lb->io_size == bwrote) {
-		pthread_mutex_lock(&lb_lock);
 		lb->state = LB_STATE_DOSYNC;
-		pthread_cond_broadcast(&lb_cond);
-		pthread_mutex_unlock(&lb_lock);
 	} else {
-		pthread_mutex_lock(&lb_lock);
 		lb->state = LB_STATE_DOIO;
 		lb->last_err = -EIO;
-		pthread_cond_broadcast(&lb_cond);
-		pthread_mutex_unlock(&lb_lock);
 	}
+	pthread_cond_broadcast(&lb_cond);
+	pthread_mutex_unlock(&lb_lock);
 }
 
 static int
-submit_io(lg_blk_t *lb, struct iovec *iov, size_t iovcnt, loff_t off,
-    size_t size)
+__lb_submit_io(lg_blk_t *lb, struct iovec *iov, size_t iovcnt, loff_t off,
+    size_t size, bool async)
 {
 	struct iocb *iocb = &lb->iocb;
 	int ret;
 
-	{
-		int i;
-		int len = 0;
-		for (i = 0; i < iovcnt; i++)
-			len += iov[i].iov_len;
-		assert(len == size);
-	}
-
-	io_prep_pwritev(iocb, lb->lg->fd, iov, iovcnt, off);
-	lb->iocb.data = (void *) lb;
 	lb->io_size = size;
-	if ((ret = io_submit(io_ctxt, 1, &iocb)) <= 0) {
-		assert(ret);
-		return ret;
-	}
-	return 0;
+	if (async) {
+		io_prep_pwritev(iocb, lb->lg->fd, iov, iovcnt, off);
+		lb->iocb.data = (void *) lb;
+		if ((ret = io_submit(io_ctxt, 1, &iocb)) == 1) 
+			return 0;
+		assert(0);
+		ret = -EIO;
+	} else {
+		if ((ret = __lg_writev(lb->lg, iov, iovcnt, size, off))) {
+			__lb_write_complete(lb, 0);
+		} else {
+			__lb_write_complete(lb, size);
+		}
+	} 
+	return ret;
 }
 
-/* Enters with lock held, returns with lock held. */
-static int lb_commit(lg_blk_t *lb, bool async)
+static inline void __schedule_io(lg_blk_t *lb)
+{
+	__mark_aio(lb);
+	lb->state = LB_STATE_DOIO;
+}
+
+static inline void __start_io(lg_blk_t *lb)
+{
+	lb->state = LB_STATE_INIO;
+}
+
+static int __lb_commit(lg_blk_t *lb, bool async)
 {
 	lm_log_t *lg = lb->lg;
-	struct sect_dlm dlm;
+	struct sect_dlm dlm, *d;
 	struct iovec *iov;
-	size_t iovidx = 0;
+	size_t iovidx;
+	size_t mod_off, mod_coff;
 	loff_t coff, off;
 	int ret = 0;
 
 	if (lb->coff < lb->off) {
-		coff = lb->coff & ~SECT_MASK;
-		if (lb->flags & LB_FLAG_ALIGNEDIO && 
-		    !(lb->flags & LB_FLAG_FULL)) {
-			off = lb->off & ~SECT_MASK;
-			if (lb->off & SECT_MASK)
-				iovidx = __lb_commit(lb, lb->lsh_iovidx,
-				    lb->coff, off);
-			else
-				iovidx = __lb_commit(lb, lb->iovidx,
-				    lb->coff, off);
-		} else {
-			off = (lb->off + SECT_MASK) & ~SECT_MASK; 
-			iovidx = __lb_commit(lb, lb->iovidx, lb->coff, lb->off);
-		}
 		iov = lb->iovecs;
-	} else if (lb->flags & LB_FLAG_FULL) {
+		coff = __sect_floor(lb->coff);
+		mod_coff = __sect_mod(lb->coff);
+	    
+		if (mod_coff) {
+			d = iov[0].iov_base;
+			d->seqno++;
+		} else {
+			d = __lb_next_ps_dlm(lb);
+			d->logid = lg->logid;
+			d->seqno = 0;
+			d->flags = __is_nohdr(lb) ? 0 : SECT_FLAG_HDR;
+			iov[0].iov_base = d;
+		}
+		if (async && !__is_full(lb)) {
+			off = __sect_floor(lb->off);
+			if ((mod_off = __sect_mod(lb->off))) 
+				iovidx = lb->lsh_iovidx;
+			else
+				iovidx = lb->iovidx;
+			assert(coff != off);
+	    		__put_sect_coff(lg, d, SECT_TLR_OFFSET);
+			iov[lb->fst_iovidx].iov_base = d;
+		} else {
+			off = __sect_ceiling(lb->off);
+			mod_off = __sect_mod(lb->off);
+			iovidx = lb->iovidx;
+			
+			if (coff == __sect_floor(off)) {
+				goto last;
+			} else {
+				__put_sect_coff(lg, d, SECT_TLR_OFFSET);
+				iov[lb->fst_iovidx].iov_base = d;
+			}
+	        	if (mod_off) {
+				d = __lb_next_ps_dlm(lb);
+			    	d->logid = lg->logid;
+				d->seqno = 0;
+				d->flags = 0;
+			    	iov[lb->lsh_iovidx].iov_base = d;
+last:
+				__put_sect_coff(lg, d, mod_off);
+
+			    	iov[iovidx].iov_base = lg->zero_sect;
+			       	iov[iovidx++].iov_len = SECT_TLR_OFFSET -
+				    mod_off;
+	
+				iov[iovidx].iov_base = d;
+				iov[iovidx++].iov_len = SECT_DLM_SIZE;
+			}
+		}
+	} else if (__is_full(lb)) {
 		assert(lb->coff == lb->off);
-		coff = off = (lb->off + SECT_MASK) & ~SECT_MASK;
+		coff = off = __sect_ceiling(lb->off);
 		iov = &lb->iovecs[lb->iovidx];
 		iovidx = 0;
 	} 
-	if (lb->flags & LB_FLAG_FULL) {
+	if (__is_full(lb)) {
 		if (off < lg->size) {
 			dlm.logid = lg->logid;
 			dlm.seqno = 0;
@@ -405,20 +401,12 @@ static int lb_commit(lg_blk_t *lb, bool async)
 			} while (off < lg->size);
 		}
 	} 
-
 	if (iovidx == 0) {
 		pthread_mutex_lock(&lb_lock);
 		__lb_commit_finish(lb);
 		return 0;
 	}
-	if (async) 
-		return submit_io(lb, iov, iovidx, coff, off - coff);
-	lb->io_size = off - coff;
-	if ((ret = __lg_writev(lg, iov, iovidx, off - coff, coff)))
-		__lb_write_complete(lb, 0);
-	else
-		__lb_write_complete(lb, lb->io_size);
-	return ret;
+	return __lb_submit_io(lb, iov, iovidx, coff, off - coff, async);
 }
 
 static int __lb_reserve(lg_blk_t *lb, size_t size)
@@ -433,9 +421,8 @@ static int __lb_reserve(lg_blk_t *lb, size_t size)
 	if (lg->size_avail < size) {
 		iov_needed = ((lg->size - lb->off) >> SECT_SHFT) * 3 + 3;
 		if (lb->iovmax - lb->iovidx >= iov_needed)
-			lb->flags |= LB_FLAG_FULL;
-		lb->flags |= LB_FLAG_ALIGNEDIO;
-		lb->state = LB_STATE_DOIO;
+			__mark_full(lb);
+		__schedule_io(lb);
 		return -ENOSPC;
 	}
 	len = lg->part_size + size;
@@ -466,14 +453,12 @@ static int __lb_reserve(lg_blk_t *lb, size_t size)
 			lsh_iovidx_delta = -3;
 		}
 	}
-	if (lb->iovmax - lb->iovidx < iov_needed) {
-		lb->flags |= LB_FLAG_ALIGNEDIO;
-		lb->state = LB_STATE_DOIO;
+	if (lb->iovmax - lb->iovidx < (iov_needed + 2)) {
+		__schedule_io(lb);
 		return -ENOSPC;
 	} 
 	lg->part_size = part_size;
 	lg->size_avail -= size;
-//	eprintf("%d %d\n", (int) lb->iovidx, (int) iov_needed);
 	lb->iovidx += iov_needed;
 	if (lsh_iovidx_delta) 
 		lb->lsh_iovidx = lb->iovidx + lsh_iovidx_delta;
@@ -522,7 +507,6 @@ static void __lg_free(lm_log_t *lg)
 	pthread_mutex_unlock(&lg_lock);
 }
 
-static uint64_t log_seqno;
 static lm_log_t *__lg_get(void)
 {
 	lm_log_t *lg;
@@ -551,10 +535,10 @@ static int __lg_wait(void)
 			pthread_mutex_unlock(&lg_lock);
 			return ret;
 		}
-		if (!ret)
+		if (!ret && list_empty(&log_list))
 			pthread_cond_wait(&lg_cond, &lg_lock);
 	}
-	pthread_mutex_lock(&lg_lock);
+	pthread_mutex_unlock(&lg_lock);
 	return 0;
 }
 
@@ -567,9 +551,9 @@ static lg_blk_t *__lb_get(void)
 	do {
 		if (!list_empty(&lbs_list)) {
 			lb = list_last_entry(&lbs_list, lg_blk_t, lbs);
-			if (lb->flags & (LB_FLAG_FULL|LB_FLAG_FORKED)) {
+			if (__is_todel(lb)) {
 				lb = NULL;
-			} else if (lb->state == LB_STATE_ACTIVE) { 
+			} else if (__is_active(lb)) {
 				if (new_lb) 
 					__lb_free(new_lb);
 				if (new_lg) 
@@ -596,24 +580,24 @@ static lg_blk_t *__lb_get(void)
 	} while (true);
 
 	if (lb) {
-		size_t sect_off = lb->off & SECT_MASK;
+		size_t mod_off = __sect_mod(lb->off);
 
 		assert(new_lg == NULL); 
-		lb->flags |= LB_FLAG_FORKED; 
+		__mark_forked(lb);
 		lg = lb->lg;
-		if (lb->flags & LB_FLAG_ALIGNEDIO && sect_off) {
+		if (__is_aio(lb) && mod_off) {
 			/* Not a header even though coff is sect aligned */
-			new_lb->flags |= LB_FLAG_NOHDR;
-			new_lb->coff = lb->off & ~SECT_MASK;
+			__mark_nohdr(new_lb);
+			new_lb->coff = __sect_floor(lb->off);
 			new_lb->off = lb->off;
 			new_lb->iovidx = lb->iovidx - lb->lsh_iovidx;
 			memmove(new_lb->iovecs, lb->iovecs + lb->lsh_iovidx,
 				(new_lb->iovidx * sizeof(struct iovec)));
 		} else {
 			new_lb->coff = new_lb->off = lb->off;
-			if (sect_off) {
+			if (mod_off) {
 				new_lb->iovecs[0].iov_base = lg->sect;
-				new_lb->iovecs[0].iov_len = sect_off;
+				new_lb->iovecs[0].iov_len = mod_off;
 				new_lb->iovidx = 1;
 			}
 		}
@@ -666,6 +650,10 @@ int lm_write(void *data, size_t size, lm_idx_t *li)
 			pthread_mutex_unlock(&lg_lock);
 			__lb_write(lb, data, size, off, iovidx);
 			li->off = lb->off;
+			if (lb->off - lb->coff > SECT_SIZE) {
+				__schedule_io(lb);
+				pthread_cond_signal(&flush_cond);
+			}
 			pthread_mutex_unlock(&lb_lock);
 			li->lg = lg;
 			return 0;
@@ -697,25 +685,23 @@ redo_1:
 			break;
 		switch (lb->state) {
 		case LB_STATE_ACTIVE:
-			if (!(lb->off & SECT_MASK) || 
+			if (!__sect_mod(lb->off) || 
 			    lg->seqno == lg_seqno && 
-			    (lb->off & ~SECT_MASK) >= off) {
-				eprintf("good\n");
-				lb->flags |= LB_FLAG_ALIGNEDIO;
+			    __sect_floor(lb->off) >= off) {
+				__schedule_io(lb);
 			}
 			/* fallthrough */
 		case LB_STATE_DOIO:
-    			lb->state = LB_STATE_INIO;
+			__start_io(lb);
 			pthread_mutex_unlock(&lb_lock);
-			if ((ret = lb_commit(lb,
-			    lb->flags & LB_FLAG_ALIGNEDIO))) {
+			if ((ret = __lb_commit(lb, __is_aio(lb))))  {
+				assert(0);
 				return ret;
 			}
 			pthread_mutex_lock(&lb_lock);
 			goto redo_1;
 		case LB_STATE_INIO:
-			if (!(lb->flags & LB_FLAG_ALIGNEDIO)) {
-				eprintf("bad\n");
+			if (!__is_aio(lb)) {
 				pthread_cond_wait(&lb_cond, &lb_lock);
 				goto redo_1;
 			}
@@ -786,8 +772,6 @@ done:
 	return ret;
 }
 
-static pthread_cond_t flush_cond = PTHREAD_COND_INITIALIZER;
-
 static void *flush_thread(void *arg)
 {
 	lg_blk_t *lb; 
@@ -800,14 +784,12 @@ static void *flush_thread(void *arg)
 			pthread_cond_wait(&flush_cond, &lb_lock);
 		lb = list_last_entry(&lbs_list, lg_blk_t, lbs);
 		seqno = lb->lg->seqno;
-		if ((lb->flags & (LB_FLAG_FORKED|LB_FLAG_FULL))) {
-			off = lb->off;
-		} else {
+		if (__is_active(lb))
 			off = lb->coff;
-		}
+		else
+			off = lb->off;
 		pthread_mutex_unlock(&lb_lock);
 		__lm_commit(seqno, off);
-		pthread_mutex_lock(&lb_lock);
 	}	
 }
 
@@ -1038,9 +1020,10 @@ int lm_system_init(int fd, loff_t off)
 		return -1;
 	}
 */
-	if (ret = io_setup(128, &io_ctxt))
+	if (ret = io_setup(1024, &io_ctxt))
 		return ret;
 	pthread_create(&t, NULL, io_cb, NULL);
+	pthread_create(&t, NULL, flush_thread, NULL);
 	INIT_LIST_HEAD(&lbs_list);
 	INIT_LIST_HEAD(&log_list);
 	INIT_LIST_HEAD(&full_log_list);
@@ -1117,7 +1100,7 @@ void *txer(void *arg)
 
 	while (1) { 
 		pthread_mutex_lock(&_lock);
-		while (nnn > 100000) 
+		while (nnn > 10000000) 
 			pthread_cond_wait(&ccond, &_lock);
 		pthread_mutex_unlock(&_lock);
 		
@@ -1191,11 +1174,11 @@ void *releser(void *arg)
 			pthread_cond_wait(&fcond, &_lock);
 		op = list_first_entry(&flist, struct op, list);
 		list_del(&op->list);
-		if (--nnn == 100000)
+		if (--nnn == 10000000)
 			pthread_cond_broadcast(&ccond);
 		pthread_mutex_unlock(&_lock);
 
-		usleep(100);
+		usleep(1);
 		lm_log_put(op->li.lg);
 		free(op);
 		pthread_mutex_lock(&_lock);
