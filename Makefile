@@ -1,5 +1,5 @@
 CFLAGS=-Wfatal-errors -ggdb2 #-O3
-LDFLAGS=-lpthread
+LDFLAGS=-lpthread -laio
 
 EXT=bt_ext.h pm_ext.h bm_ext.h
 PM_INT=pm_int.h
@@ -19,7 +19,7 @@ MM_EXT=mm_ext.h
 
 GLOBAL=global.h find_bit.c list.h ondisk_format.h
 
-TARGETS=mkfs test bm_test
+TARGETS=mkfs test bm_test lm_test
 
 all: $(TARGETS)
 
@@ -42,6 +42,9 @@ bt_page.o: bt_page.c $(BT_INT) $(BT_EXT) $(BM_EXT) $(PM_EXT) \
 	gcc -c bt_page.c $(CFLAGS) -o $@
 tx.o: tx.c $(TX_INT) $(TX_EXT) $(MM_EXT) $(GLOBAL)
 	gcc -c tx.c $(CFLAGS) -o $@
+
+lm_test: lm.c $(LM_INT) $(LM_EXT) $(PM_EXT) $(BM_EXT) $(GLOBAL)
+	gcc lm.c -DTEST $(CFLAGS) -o $@ $(LDFLAGS)
 
 bm_main.o: bm.c $(BM_INT) $(BM_EXT) $(PM_EXT) $(TX_EXT) $(GLOBAL)
 	gcc -c bm.c -DTEST $(CFLAGS) -o $@

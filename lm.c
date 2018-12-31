@@ -45,6 +45,7 @@ static inline void __lb_init_fs_mrkrs(lg_blk_t *lb)
 {
 	lb->fs_dlm.logid = lb->lg->logid;
 	lb->fs_dlm.seqno = 0;
+	lb->fs_dlm.flags = 0;
 	__put_sect_coff(lb->lg, &lb->fs_dlm, SECT_TLR_OFFSET); 
 }
 
@@ -53,7 +54,6 @@ __lg_writev(lm_log_t *lg, struct iovec *iov, int cnt, size_t size, loff_t off)
 {
 	ssize_t b, ret;
 
-	printf("Flushing @ %d %d\n", (int)off, (int)size);
 	if (lg->mmaped_addr) {
 		size_t len = 0, i;
 
@@ -76,14 +76,13 @@ __lg_write(lm_log_t *lg, void *data, size_t size, loff_t off)
 {
 	ssize_t b, ret;
 
-	printf("Flushing @ %d %d\n", (int)off, (int)size);
 	if (lg->mmaped_addr) {
 		size_t len = 0, i;
 
 		memcpy(lg->mmaped_addr + off, data, size);
 		return 0;
 	} 
-	if (size != (b = pwrite(lg->fd, data, size, off)))
+	if (size != (b = pwrite(lg->fd, data, size, lg->base_offset + off)))
 		return -EIO;
 	return 0;
 }
@@ -112,17 +111,17 @@ static lg_blk_t *__lb_alloc(void)
 {
 	lg_blk_t *lb;
 
-	if (!(lb = malloc(sizeof (lg_blk_t))))
-		return NULL;
-	lb->iovidx = 0;
-	lb->iovmax = LB_MAX_IOVCNT;
-	lb->off = lb->coff = 0;
-	lb->psi = 0;
-	lb->lsh_iovidx = 0;	
-	lb->fst_iovidx = 0;		
-	lb->flags = 0;
-	lb->last_err = 0;
-	lb->state = LB_STATE_ACTIVE;
+	if ((lb = malloc(sizeof (lg_blk_t)))) {
+		lb->iovidx = 0;
+		lb->iovmax = LB_MAX_IOVCNT;
+		lb->off = lb->coff = 0;
+		lb->psi = 0;
+		lb->lsh_iovidx = 0;	
+		lb->fst_iovidx = 0;		
+		lb->flags = 0;
+		lb->last_err = 0;
+		lb->state = LB_STATE_ACTIVE;
+	}
 	return lb;
 }
 
@@ -157,8 +156,6 @@ static int __lg_reset(lm_log_t *lg)
 static void __lg_mark_available(lm_log_t *lg)
 {
 	list_del(&lg->list);
-	lg->size_avail = (lg->size >> SECT_SHFT) * SECT_DATA_SIZE;
-	lg->part_size = 0;
 	lg->commit_count = 0;
 	list_add_tail(&lg->list, &log_list);
 	pthread_cond_broadcast(&lg_cond);
@@ -209,12 +206,12 @@ void lm_log_put(lm_log_t *lg)
 	pthread_mutex_unlock(&lg_lock);
 }
 
-static void __lb_remove(lg_blk_t *lb, bool isfull)
+static void __lb_remove(lg_blk_t *lb)
 {
 	list_del(&lb->lbs);
 	pthread_cond_broadcast(&lb_cond);
 	pthread_mutex_unlock(&lb_lock);
-	if (isfull) 
+	if (__is_full(lb)) 
 		__lg_mark_full(lb->lg);
 	__lb_free(lb);
 	return; 
@@ -224,8 +221,8 @@ static void __lb_commit_finish(lg_blk_t *lb)
 {
 	size_t mod_off;
 
-	if (__is_todel(lb)) {
-		__lb_remove(lb, __is_full(lb));
+	if (__is_full(lb) || __is_forked(lb)) {
+		__lb_remove(lb);
 		return;
 	} 
 	mod_off = __sect_mod(lb->off);
@@ -284,19 +281,22 @@ static int
 __lb_submit_io(lg_blk_t *lb, struct iovec *iov, size_t iovcnt, loff_t off,
     size_t size, bool async)
 {
+	lm_log_t *lg = lb->lg;
 	struct iocb *iocb = &lb->iocb;
 	int ret;
+	struct sect_dlm *d = iov[0].iov_base;
 
 	lb->io_size = size;
 	if (async) {
-		io_prep_pwritev(iocb, lb->lg->fd, iov, iovcnt, off);
+		io_prep_pwritev(iocb, lg->fd, iov, iovcnt,
+		    off + lg->base_offset);
 		lb->iocb.data = (void *) lb;
 		if ((ret = io_submit(io_ctxt, 1, &iocb)) == 1) 
 			return 0;
 		assert(0);
 		ret = -EIO;
 	} else {
-		if ((ret = __lg_writev(lb->lg, iov, iovcnt, size, off))) {
+		if ((ret = __lg_writev(lg, iov, iovcnt, size, off))) {
 			__lb_write_complete(lb, 0);
 		} else {
 			__lb_write_complete(lb, size);
@@ -319,185 +319,107 @@ static inline void __start_io(lg_blk_t *lb)
 static int __lb_commit(lg_blk_t *lb, bool async)
 {
 	lm_log_t *lg = lb->lg;
-	struct sect_dlm dlm, *d;
+	struct sect_dlm *d;
 	struct iovec *iov;
-	size_t iovidx;
+	size_t iovidx = 0;
 	size_t mod_off, mod_coff;
 	loff_t coff, off;
 	int ret = 0;
 
-	if (lb->coff < lb->off) {
-		iov = lb->iovecs;
-		coff = __sect_floor(lb->coff);
-		mod_coff = __sect_mod(lb->coff);
-	    
-		if (mod_coff) {
-			d = iov[0].iov_base;
-			d->seqno++;
-		} else {
-			d = __lb_next_ps_dlm(lb);
-			d->logid = lg->logid;
-			d->seqno = 0;
-			d->flags = __is_nohdr(lb) ? 0 : SECT_FLAG_HDR;
-			iov[0].iov_base = d;
-		}
-		if (async && !__is_full(lb)) {
-			off = __sect_floor(lb->off);
-			if ((mod_off = __sect_mod(lb->off))) 
-				iovidx = lb->lsh_iovidx;
-			else
-				iovidx = lb->iovidx;
-			assert(coff != off);
-	    		__put_sect_coff(lg, d, SECT_TLR_OFFSET);
-			iov[lb->fst_iovidx].iov_base = d;
-		} else {
-			off = __sect_ceiling(lb->off);
-			mod_off = __sect_mod(lb->off);
-			iovidx = lb->iovidx;
-			
-			if (coff == __sect_floor(off)) {
-				goto last;
-			} else {
-				__put_sect_coff(lg, d, SECT_TLR_OFFSET);
-				iov[lb->fst_iovidx].iov_base = d;
-			}
-	        	if (mod_off) {
-				d = __lb_next_ps_dlm(lb);
-			    	d->logid = lg->logid;
-				d->seqno = 0;
-				d->flags = 0;
-			    	iov[lb->lsh_iovidx].iov_base = d;
-last:
-				__put_sect_coff(lg, d, mod_off);
-
-			    	iov[iovidx].iov_base = lg->zero_sect;
-			       	iov[iovidx++].iov_len = SECT_TLR_OFFSET -
-				    mod_off;
-	
-				iov[iovidx].iov_base = d;
-				iov[iovidx++].iov_len = SECT_DLM_SIZE;
-			}
-		}
-	} else if (__is_full(lb)) {
-		assert(lb->coff == lb->off);
-		coff = off = __sect_ceiling(lb->off);
-		iov = &lb->iovecs[lb->iovidx];
-		iovidx = 0;
-	} 
-	if (__is_full(lb)) {
-		if (off < lg->size) {
-			dlm.logid = lg->logid;
-			dlm.seqno = 0;
-			dlm.flags = SECT_FLAG_HDR;
-			__put_sect_coff(lg, &dlm, SECT_DLM_SIZE);
-			do {
-				iov[iovidx].iov_base = &dlm;
-				iov[iovidx++].iov_len = SECT_DLM_SIZE;
-				iov[iovidx].iov_base = lg->zero_sect;
-				iov[iovidx++].iov_len = SECT_DATA_SIZE;
-				iov[iovidx].iov_base = &dlm;
-				iov[iovidx++].iov_len = SECT_DLM_SIZE;
-				off += SECT_SIZE;
-			} while (off < lg->size);
-		}
-	} 
-	if (iovidx == 0) {
+	if (lb->coff == lb->off) {
 		pthread_mutex_lock(&lb_lock);
 		__lb_commit_finish(lb);
 		return 0;
 	}
+	assert(lb->coff < lb->off);
+	iov = lb->iovecs;
+	coff = __sect_floor(lb->coff);
+	mod_coff = __sect_mod(lb->coff);
+	    
+	if (mod_coff) {
+		d = iov[0].iov_base;
+		d->seqno++;
+	} else {
+		d = __lb_next_ps_dlm(lb);
+		d->logid = lg->logid;
+		d->seqno = 0;
+		d->flags = __is_nohdr(lb) ? 0 : SECT_FLAG_HDR;
+		iov[0].iov_base = d;
+	}
+	if (async) {
+		off = __sect_floor(lb->off);
+		assert(coff != off);
+		if ((mod_off = __sect_mod(lb->off))) 
+			iovidx = lb->lsh_iovidx;
+		else
+			iovidx = lb->iovidx;
+    		__put_sect_coff(lg, d, SECT_TLR_OFFSET);
+		iov[lb->fst_iovidx].iov_base = d;
+	} else {
+		off = __sect_ceiling(lb->off);
+		mod_off = __sect_mod(lb->off);
+		iovidx = lb->iovidx;
+		if (coff == __sect_floor(off)) {
+			goto last;
+		} else {
+			__put_sect_coff(lg, d, SECT_TLR_OFFSET);
+			iov[lb->fst_iovidx].iov_base = d;
+		}
+        	if (mod_off) {
+			d = __lb_next_ps_dlm(lb);
+			d->logid = lg->logid;
+			d->seqno = 0;
+			d->flags = 0;
+			iov[lb->lsh_iovidx].iov_base = d;
+last:
+			__put_sect_coff(lg, d, mod_off);
+			iov[iovidx].iov_base = lg->zero_sect;
+			iov[iovidx++].iov_len = SECT_TLR_OFFSET - mod_off;
+			iov[iovidx].iov_base = d;
+			iov[iovidx++].iov_len = SECT_DLM_SIZE;
+		}
+	}
 	return __lb_submit_io(lb, iov, iovidx, coff, off - coff, async);
 }
 
-static int __lb_reserve(lg_blk_t *lb, size_t size)
-{
-	lm_log_t *lg = lb->lg;
-	size_t len, sec;
-	int prev_sect = 0;
-	int iov_needed;
-	int lsh_iovidx_delta = 0;
-	size_t part_size;
-
-	if (lg->size_avail < size) {
-		iov_needed = ((lg->size - lb->off) >> SECT_SHFT) * 3 + 3;
-		if (lb->iovmax - lb->iovidx >= iov_needed)
-			__mark_full(lb);
-		__schedule_io(lb);
-		return -ENOSPC;
-	}
-	len = lg->part_size + size;
-	sec = len / SECT_DATA_SIZE;		
-	if (lg->part_size) {
-		if ((part_size = len % SECT_DATA_SIZE)) {
-			if (sec) {
-				iov_needed = sec * 3 + 1;
-				lsh_iovidx_delta = -2;
-			} else {
-				iov_needed = 1;
-			}
-		} else {
-			assert(sec >= 1);
-			iov_needed = sec * 3 - 1;
-			if (sec > 1)
-				lsh_iovidx_delta = -3;
-		}
-	} else {
-		if ((part_size = len % SECT_DATA_SIZE)) {
-			if (sec) 
-				iov_needed = sec * 3 + 2;
-			else
-				iov_needed = 2;
-			lsh_iovidx_delta = -2;
-		} else {
-			iov_needed = sec * 3;
-			lsh_iovidx_delta = -3;
-		}
-	}
-	if (lb->iovmax - lb->iovidx < (iov_needed + 2)) {
-		__schedule_io(lb);
-		return -ENOSPC;
-	} 
-	lg->part_size = part_size;
-	lg->size_avail -= size;
-	lb->iovidx += iov_needed;
-	if (lsh_iovidx_delta) 
-		lb->lsh_iovidx = lb->iovidx + lsh_iovidx_delta;
-	lb->off = (lb->off & ~SECT_MASK) + (sec << SECT_SHFT); 
-	if (lg->part_size) 
-		lb->off += lg->part_size + SECT_DLM_SIZE;
-	assert(lb->iovidx <= lb->iovmax);
-	return 0;
-}
-
-static void
-__lb_write(lg_blk_t *lb, void *data, size_t size, loff_t off, size_t iovidx)
+static size_t  __lb_write(lg_blk_t *lb, void *data, size_t size)
 {
 	size_t len;
 
 	do {
-		if ((off & SECT_MASK) == 0) {
-			lb->iovecs[iovidx].iov_base = &lb->fs_dlm;
-			lb->iovecs[iovidx++].iov_len = SECT_DLM_SIZE;
-			off += SECT_DLM_SIZE;
+		if ((lb->off & SECT_MASK) == 0) {
+			lb->lsh_iovidx = lb->iovidx;
+			lb->iovecs[lb->iovidx].iov_base = &lb->fs_dlm;
+			lb->iovecs[lb->iovidx++].iov_len = SECT_DLM_SIZE;
+			lb->off += SECT_DLM_SIZE;
+			if (lb->off == SECT_DLM_SIZE) {
+				lb->iovecs[lb->iovidx].iov_base = 
+				    &lb->lg->seqno;
+				lb->iovecs[lb->iovidx++].iov_len =
+				    sizeof (uint64_t);
+				lb->off += sizeof (uint64_t);
+			}
 		}
-		len = SECT_TLR_OFFSET - (off & SECT_MASK);
-		lb->iovecs[iovidx].iov_base = data;
+		len = SECT_TLR_OFFSET - (lb->off & SECT_MASK);
+		lb->iovecs[lb->iovidx].iov_base = data;
 		if (size >= len) { 
-			lb->iovecs[iovidx++].iov_len = len;
-			if ((lb->coff >> SECT_SHFT) == (off >> SECT_SHFT))
-				lb->fst_iovidx = iovidx;
-			lb->iovecs[iovidx].iov_base = &lb->fs_dlm;
-			lb->iovecs[iovidx++].iov_len = SECT_DLM_SIZE;
-			off += len + SECT_DLM_SIZE;
+			lb->iovecs[lb->iovidx++].iov_len = len;
+			if ((lb->coff >> SECT_SHFT) == (lb->off >> SECT_SHFT))
+				lb->fst_iovidx = lb->iovidx;
+			lb->iovecs[lb->iovidx].iov_base = &lb->fs_dlm;
+			lb->iovecs[lb->iovidx++].iov_len = SECT_DLM_SIZE;
+			lb->off += len + SECT_DLM_SIZE;
 			data += len;
 		} else {
-			lb->iovecs[iovidx++].iov_len = size;
-			off += size;
+			lb->iovecs[lb->iovidx++].iov_len = size;
+			lb->off += size;
 			len = size;
 		}
-	} while (size -= len);
-	assert(lb->iovidx == iovidx);
-	assert(lb->off == off);
+		size -= len;
+	} while (size && lb->off < lb->lg->size &&
+	    (lb->iovidx + 3) < lb->iovmax);
+	assert(lb->iovidx <= lb->iovmax);
+	return size;
 }
 
 static void __lg_free(lm_log_t *lg)
@@ -510,7 +432,6 @@ static void __lg_free(lm_log_t *lg)
 static lm_log_t *__lg_get(void)
 {
 	lm_log_t *lg;
-	int ret = -EAGAIN;
 
 	pthread_mutex_lock(&lg_lock);
 	if (list_empty(&log_list)) {
@@ -542,43 +463,41 @@ static int __lg_wait(void)
 	return 0;
 }
 
+static int __recover_active_lb(lm_log_t *lg, loff_t off)
+{
+	lg_blk_t *lb;
+
+	if (!(lb = __lb_alloc())) 
+		return -ENOMEM;
+	lg->commit_count++;
+	lb->lg = lg;
+	lb->coff = lb->off = off;
+	__lb_init_fs_mrkrs(lb);
+	list_add_tail(&lb->lbs, &lbs_list);
+	return 0;
+}
+
 static lg_blk_t *__lb_get(void)
 {
 	int ret;
 	lg_blk_t *lb = NULL, *new_lb = NULL;
 	lm_log_t *lg, *new_lg = NULL;
 
-	do {
-		if (!list_empty(&lbs_list)) {
-			lb = list_last_entry(&lbs_list, lg_blk_t, lbs);
-			if (__is_todel(lb)) {
-				lb = NULL;
-			} else if (__is_active(lb)) {
-				if (new_lb) 
-					__lb_free(new_lb);
-				if (new_lg) 
-					__lg_free(new_lg);
-				return lb;
-			}
+	if (!list_empty(&lbs_list)) {
+		lb = list_last_entry(&lbs_list, lg_blk_t, lbs);
+		if (__is_full(lb) || __is_forked(lb)) {
+			lb = NULL;
+		} else if (__is_active(lb)) {
+			return lb;
 		}
-		if (!new_lb) {
-			pthread_mutex_unlock(&lb_lock);
-			if (!(new_lb = __lb_alloc())) 
-				return ERR_PTR(-ENOMEM);
-			pthread_mutex_lock(&lb_lock);
-		} else if (!lb && !(new_lg = __lg_get())) {
-			pthread_mutex_unlock(&lb_lock);
-			if ((ret = __lg_wait())) {
-				if (new_lb)
-					__lb_free(new_lb);
-				return ERR_PTR(ret);
-			}
-			pthread_mutex_lock(&lb_lock);
-		} else {
-			break;
-		}
-	} while (true);
-
+	}
+	if (!new_lb && !(new_lb = __lb_alloc())) { 
+		return ERR_PTR(-ENOMEM);
+	} else if (!lb && !(new_lg = __lg_get())) {
+		if (new_lb)
+			__lb_free(new_lb);
+		return ERR_PTR(-EBUSY);
+	}
 	if (lb) {
 		size_t mod_off = __sect_mod(lb->off);
 
@@ -613,7 +532,6 @@ static lg_blk_t *__lb_get(void)
 
 void *io_cb(void *arg)
 {
-	lg_blk_t *lb;
 	struct io_event events[128];
 	int n, i;
 
@@ -630,39 +548,56 @@ void *io_cb(void *arg)
 int lm_write(void *data, size_t size, lm_idx_t *li)
 {
 	lm_log_t *lg;
-	lg_blk_t *lb;
+	lg_blk_t *lb, *lb2;
 	loff_t off;
 	size_t iovidx;
-	int ret;
+	int ret, len;
 
+retry:
 	pthread_mutex_lock(&lb_lock);
-	do {
-		if (IS_ERR(lb = __lb_get())) {
-			pthread_mutex_unlock(&lb_lock);
-			return PTR_ERR(lb);
+	if (IS_ERR(lb = __lb_get())) {
+		pthread_mutex_unlock(&lb_lock);
+		if (PTR_ERR(lb) == -EBUSY) {
+			if ((ret = __lg_wait()))
+				return ret;
+			goto retry; 
 		}
-		lg = lb->lg;
-		off = lb->off;
-		iovidx = lb->iovidx;
-		if (!(ret = __lb_reserve(lb, size))) {
-			pthread_mutex_lock(&lg_lock);
-			lg->commit_count++;	
-			pthread_mutex_unlock(&lg_lock);
-			__lb_write(lb, data, size, off, iovidx);
-			li->off = lb->off;
-			if (lb->off - lb->coff > SECT_SIZE) {
-				__schedule_io(lb);
-				pthread_cond_signal(&flush_cond);
+		return PTR_ERR(lb);
+	}
+	li->lg1 = lb->lg;
+	li->soff = lb->off;
+	iovidx = lb->iovidx;
+	if ((len = __lb_write(lb, data, size))) {
+		if (IS_ERR(lb2 = __lb_get())) {
+			lb->off = li->soff;
+			lb->iovidx = iovidx;
+			pthread_mutex_unlock(&lb_lock);
+			if (PTR_ERR(lb2) == -EBUSY) {
+				if ((ret = __lg_wait()))
+					return ret;
+				goto retry; 
 			}
-			pthread_mutex_unlock(&lb_lock);
-			li->lg = lg;
-			return 0;
-		} else if (ret != -ENOSPC) {
-			break;
+			return PTR_ERR(lb2);
 		}
-	}  while (true);
+		__schedule_io(lb);
+		pthread_cond_signal(&flush_cond);
+		__lb_write(lb2, data + size - len, len);
+		li->lg2 = lb2->lg;
+		pthread_mutex_lock(&lg_lock);
+		li->lg2->commit_count++;	
+		pthread_mutex_unlock(&lg_lock);
+		lb = lb2;
+	}
+	pthread_mutex_lock(&lg_lock);
+	li->lg1->commit_count++;	
+	pthread_mutex_unlock(&lg_lock);
+	li->eoff = lb->off;
+	if (lb->off - lb->coff > SECT_SIZE) {
+		__schedule_io(lb);
+		pthread_cond_signal(&flush_cond);
+	}
 	pthread_mutex_unlock(&lb_lock);
-	return ret;
+	return 0;
 }
 
 int __lm_commit(uint64_t lg_seqno, loff_t off)
@@ -694,7 +629,7 @@ redo_1:
 		case LB_STATE_DOIO:
 			__start_io(lb);
 			pthread_mutex_unlock(&lb_lock);
-			if ((ret = __lb_commit(lb, __is_aio(lb))))  {
+			if ((ret = __lb_commit(lb, __is_aio(lb)))) {
 				assert(0);
 				return ret;
 			}
@@ -780,7 +715,7 @@ static void *flush_thread(void *arg)
 
 	while (1) {
 		pthread_mutex_lock(&lb_lock);
-		if (list_empty(&lbs_list))
+		while (list_empty(&lbs_list))
 			pthread_cond_wait(&flush_cond, &lb_lock);
 		lb = list_last_entry(&lbs_list, lg_blk_t, lbs);
 		seqno = lb->lg->seqno;
@@ -798,30 +733,31 @@ int lm_commit(lm_log_t *lg, loff_t off)
 	return __lm_commit(lg->seqno, off);
 }
 
-static int
-__log_init(lm_log_t *lg, loff_t start_sect)
+static int __log_init(lm_log_t *lg, loff_t start_sect)
 {
-	struct iovec iov[3];
-	struct sect_dlm hdr;
-	struct sect_dlm tlr;
-	int ret = 0;
-	int i;
+	int ret = 0, i;
+	struct sect_dlm *hdr;
+	struct sect_dlm *tlr;
+	static int j;
 
-	tlr.logid = hdr.logid = !lg->logid;
-	__put_sect_coff(lg, &tlr, 0);
-	__put_sect_coff(lg, &hdr, 0);
-
-	iov[0].iov_base = &hdr;
-	iov[0].iov_len = SECT_DLM_SIZE;
-	iov[1].iov_base = lg->zero_sect;
-	iov[1].iov_len = SECT_DATA_SIZE;
-	iov[2].iov_base = &tlr;
-	iov[2].iov_len = SECT_DLM_SIZE;
+	hdr = (lg->sect + SECT_HDR_OFFSET);
+	tlr = (lg->sect + SECT_TLR_OFFSET);
+	hdr->flags = tlr->flags = 0;
+	hdr->seqno = tlr->seqno = 0;
+	__put_sect_coff(lg, hdr, SECT_HDR_OFFSET);	
+	__put_sect_coff(lg, tlr, SECT_HDR_OFFSET);	
+	tlr->logid = !lg->logid;
 	for (i = start_sect; i < (lg->size >> SECT_SHFT); i++) {
-		if ((ret = __lg_writev(lg, iov, 3, SECT_SIZE, i << SECT_SHFT)))
+		hdr->logid = (i == 0) ?  lg->logid : !lg->logid;
+		if ((ret = __lg_write(lg, lg->sect, SECT_SIZE, i << SECT_SHFT)))
 			return ret;
 	}
-	return fsync(lg->fd);
+	if ((ret = fsync(lg->fd))) 
+		return ret;
+	if (start_sect &&
+	    (ret = __recover_active_lb(lg, start_sect << SECT_SHFT)))
+		return ret;
+	return 0;
 }
 
 static void 
@@ -835,7 +771,7 @@ __recover_sector(lm_log_t *lg, void *buf, loff_t sect, int *hdr_flag)
 {
 	struct sect_dlm *hdr;
 	struct sect_dlm *tlr;
-	int ret;
+	int ret, len;
 
 	if ((ret = __lg_read(lg, buf, SECT_SIZE, sect << SECT_SHFT)))
 		return ret;
@@ -848,33 +784,68 @@ __recover_sector(lm_log_t *lg, void *buf, loff_t sect, int *hdr_flag)
 
 	if (hdr->seqno == tlr->seqno) {
 		*hdr_flag = (hdr->flags & SECT_FLAG_HDR);
-		return __get_sect_coff(lg, hdr);
+		len = __get_sect_coff(lg, hdr);
 	} else {
 		*hdr_flag = (tlr->flags & SECT_FLAG_HDR);
-	 	return __get_sect_coff(lg, tlr);
+	 	len = __get_sect_coff(lg, tlr);
 	}
+	assert(len <= SECT_TLR_OFFSET);
+	if (len >= SECT_DLM_SIZE)
+		return len - SECT_DLM_SIZE;
+	assert(len == 0);
+	return 0;
+}
+
+static int
+__lg_recover_seqno(lm_log_t *lg)
+{
+	int ret;
+	int hdr_flag;
+
+	if ((ret = __recover_sector(lg, lg->sect, 0, &hdr_flag)) < 0) 
+		return ret;
+	if (ret) {
+		assert(ret > sizeof(uint64_t));
+		lg->seqno = *(uint64_t *) (lg->sect + SECT_DLM_SIZE);
+	} else {
+		lg->seqno = ~0ULL;
+	}
+	return 0;
+}
+
+static int 
+__call_rcb(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
+{
+	lb_rec_t *rec;
+	int ret, len = 0;
+
+	while ((ret = (*cb)(buf, size - len, cb_arg)) > 0) {
+		lg->commit_count++;
+		buf += ret;
+		len += ret;
+	}
+	if (ret)
+		return ret;
+    	return len;
 }
 
 static int
 __lg_recover(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
 {
-	void *sect;
 	loff_t off = 0, sec_off;
 	ssize_t len, sec = 0;
-	ssize_t ret = 0;
+	ssize_t ret = 0, skip = sizeof (uint64_t);
 	ssize_t total_len = 0;
 	int hdr_flag;
 	int i;
 	bool expect_hdr = true;
 
-	if ((sect = malloc(SECT_SIZE)))
-		return -ENOMEM;
-	lg->flr_seqno = 0;
 	for (i = 0; i < lg->size >> SECT_SHFT; i++) {
-		if ((len = __recover_sector(lg, sect, i, &hdr_flag)) < 0) 
+		if ((len = __recover_sector(lg, lg->sect, i, &hdr_flag)) < 0) 
 			return len;
-		if (len <= SECT_DLM_SIZE)
+		if (!len)
 			break;
+		assert(len >= sizeof(uint64_t));
 		if (expect_hdr) {
 			if (!hdr_flag)
 				break;
@@ -882,56 +853,53 @@ __lg_recover(lm_log_t *lg, void *buf, size_t size, lm_rcb_t cb, void *cb_arg)
 			sec = i;
 			total_len = 0;
 		}
-		len -= SECT_DLM_SIZE;
-		assert(len > sizeof(uint64_t));
-
-		if (i == 0) {
-			lg->flr_seqno = 
-			    ((lb_rec_t *)(sect + SECT_DLM_SIZE))->hdr.lsn;
-		}
-		memmove(buf + off, sect + SECT_DLM_SIZE, len);
+		memmove(buf + off, lg->sect + SECT_DLM_SIZE, len);
 		off += len;
-		if ((size - off) < SECT_DATA_SIZE || len < SECT_DATA_SIZE) {
-			if ((ret = (*cb)(buf, off, cb_arg)) < 0) 
+		if ((size - off) < SECT_DATA_SIZE || len < SECT_DATA_SIZE) {	
+			if ((ret = __call_rcb(lg, buf + skip, off - skip,
+			    cb, cb_arg)) < 0)
 				return ret;
-			memmove(buf, buf + ret, off - ret);
+			ret += skip;
 			off -= ret;
 			total_len += ret;
+			memmove(buf, buf + ret, off);
+			skip = 0;
 		}
 		expect_hdr = (len < SECT_DATA_SIZE) ? true : false;
 	}
 	ret = 0;
-	if (off && ((ret = (*cb)(buf, off, cb_arg)) < 0)) 
+	if (off && (ret = __call_rcb(lg, buf + skip, off - skip,
+	    cb, cb_arg)) < 0)
 		return ret;
-	total_len + ret;
+	ret += skip;
+	total_len += ret;
 	sec += total_len / SECT_DATA_SIZE;
 	sec_off = total_len % SECT_DATA_SIZE;
 	off = sec << SECT_SHFT;
 	if (sec_off) {
 		struct sect_dlm *dlm;
 
-		if (__lg_read(lg, sect, SECT_SIZE, off))
-			return -EIO;
-
-		dlm = (struct sect_dlm *) (sect + SECT_HDR_OFFSET);
-		dlm->seqno = dlm->seqno + 1;
+		if ((ret = __lg_read(lg, lg->sect, SECT_SIZE, off)))
+			return ret;
+		dlm = (lg->sect + SECT_HDR_OFFSET);
 		__put_sect_coff(lg, dlm, sec_off);	
-		memcpy(sect + SECT_TLR_OFFSET, dlm, SECT_DLM_SIZE);
-		if (__lg_write(lg, sect, SECT_SIZE, off))
-			return -EIO;
+		memcpy(lg->sect + SECT_TLR_OFFSET, dlm, SECT_DLM_SIZE);
+		if ((ret = __lg_write(lg, lg->sect, SECT_SIZE, off)))
+			return ret;
 		sec = sec + 1;
 		off += SECT_SIZE;
 	} 
-	if (off < lg->size)
+	if (off < lg->size) 
 		return __log_init(lg, sec);
 	else if (sec_off) 
 		return fsync(lg->fd);
-	else
-		return 0;
+	return 0;
 }
 
 void log_free(lm_log_t *lg)
 {
+	if (lg->sect)
+		free(lg->sect);
 	if (lg->zero_sect)
 		free(lg->zero_sect);
 	free(lg);
@@ -945,7 +913,7 @@ log_alloc(int fd, loff_t offset, size_t size, void *addr)
 	assert((size & SECT_MASK) == 0);
 	if (!(lg = malloc(sizeof (lm_log_t))))
 		return ERR_PTR(-ENOMEM);
-	if (!(lg->sect = calloc(1, SECT_SIZE))) {
+	if (!(lg->sect = malloc(SECT_SIZE))) {
 		free(lg);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -962,11 +930,10 @@ log_alloc(int fd, loff_t offset, size_t size, void *addr)
 		lg->base_offset = offset;
 		lg->mmaped_addr = NULL;
 	}
+	lg->seqno = 0;
 	lg->logid = 0;
 	lg->commit_count = 0;
 	lg->size = size;
-	lg->size_avail = (size >> SECT_SHFT) * SECT_DATA_SIZE;
-	lg->part_size = 0;
 	return lg;
 }
 
@@ -976,31 +943,49 @@ __recover(void *data, size_t size, int idx, void *arg)
 	printf("hai %ld\n", size);
 	return size;
 }
-#if 0
-int 
-lm_set_valid_range(int in_head, int in_tail)
-{
-	head = in_head;
-	tail = in_tail;
-	eprintf("head:%d tail:%d\n", head, tail);
-}
-#endif
 
 int
 lm_scan(lm_rcb_t rcb, void *arg)
 {
-	lm_log_t *lg, *tmp;
-	int i, ret = 0;
+	lm_log_t *lg, *flg, *tmp;
 	void *buf;
+	int ret = 0;
 
+	list_for_each_entry(lg, &log_list, list) {
+		if (ret = __lg_recover_seqno(lg))
+			return ret;
+	}
+	list_for_each_entry_safe(lg, tmp, &log_list, list) {
+		if (lg->seqno == ~0ULL)
+			continue;
+		list_del(&lg->list);
+		list_for_each_entry(flg, &full_log_list, list) {
+			assert(flg->seqno != lg->seqno);
+			if (flg->seqno > lg->seqno) {
+				list_add_tail(&lg->list, &flg->list);
+				flg = NULL;
+				break;
+			}
+		}
+		if (flg) {
+			list_add_tail(&lg->list, &full_log_list);
+		}
+	}
 	if (!(buf = malloc(8192)))
 		return -ENOMEM;
-	list_for_each_entry_safe(lg, tmp, &log_list, list) {
-		eprintf("recovering log %d\n", i);
-		if ((ret = __lg_recover(lg, buf, 8192, rcb, arg))) 
-			break;
+	list_for_each_entry(lg, &full_log_list, list) {
+		if (log_seqno <= lg->seqno)
+			log_seqno = lg->seqno + 1;
+		if ((ret = __lg_recover(lg, buf, 8192, rcb, arg))) {
+			free(buf);
+			return ret;
+		}
 	}
 	free(buf);
+	list_for_each_entry(lg, &log_list, list) {
+		if ((ret = __log_init(lg, 0)))
+			return ret;
+	}
 	return ret;
 }
 
@@ -1029,9 +1014,8 @@ int lm_system_init(int fd, loff_t off)
 	INIT_LIST_HEAD(&full_log_list);
 
 	for (i = 0; i < TX_LOG_NBLKS; i++) {
-		if (IS_ERR(lg = log_alloc(fd, 
-		    off + (i << TX_LOG_BLK_SHFT), TX_LOG_BLK_SIZE,
-		    NULL))) {
+		if (IS_ERR(lg = log_alloc(fd, off + (i << TX_LOG_BLK_SHFT),
+		    TX_LOG_BLK_SIZE, NULL))) {
 	    		return PTR_ERR(lg);
 		}
 		list_add(&lg->list, &log_list);
@@ -1055,7 +1039,6 @@ lm_mkfs(int fd, loff_t off)
 		    TX_LOG_BLK_SIZE, NULL))) {
 	    		return PTR_ERR(lg);
 		}
-
 		if ((ret = __log_init(lg, 0)))
 			return ret;
 		log_free(lg);
@@ -1065,7 +1048,7 @@ lm_mkfs(int fd, loff_t off)
 
 #ifdef TEST
 static size_t
-__log_recover(void *data, size_t size, int idx, void *arg)
+__log_recover(void *data, size_t size, void *arg)
 {
 	printf("hai %ld\n", size);
 	return size;
@@ -1143,12 +1126,17 @@ void *logger(void *arg)
 
 		size = sizeof (struct dop) + op->dop->n * sizeof(uint32_t);
 
+		op->li.lg1 = NULL;
+		op->li.lg2 = NULL;
 		ret = lm_write(op->dop, op->dop[0].hdr.len, &op->li); 
 		assert(ret == 0);
 //    		op->lg = lm_write(&li, (lg_rec_t *) op->dop);
     
 		if ((random() % 100 == 0) && 
-		    (ret = lm_commit(op->li.lg, op->li.off))) {
+		    (ret = lm_commit(op->li.lg1,
+			op->li.lg2 ? ~0ULL : op->li.eoff)) &&
+		    op->li.lg2 &&
+		    (ret = lm_commit(op->li.lg2, op->li.eoff))) {
 			eprintf("commit error %d\n", ret);
 			break;
 		}
@@ -1179,7 +1167,9 @@ void *releser(void *arg)
 		pthread_mutex_unlock(&_lock);
 
 		usleep(1);
-		lm_log_put(op->li.lg);
+		lm_log_put(op->li.lg1);
+		if (op->li.lg2)
+			lm_log_put(op->li.lg2);
 		free(op);
 		pthread_mutex_lock(&_lock);
 	}
@@ -1203,6 +1193,9 @@ int main(int argc, char **argv)
 		exit(lm_mkfs(fd, 0));
 	}
 	ret = lm_system_init(fd, 0);
+	assert(ret == 0);
+
+	ret = lm_scan(__log_recover, NULL);
 	assert(ret == 0);
 
 	pthread_create(&t, NULL, txer, NULL);

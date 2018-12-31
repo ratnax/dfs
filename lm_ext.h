@@ -8,8 +8,10 @@ typedef struct lb_rec_t lb_rec_t;
 typedef struct lr_hdr_t lr_hdr_t;
 
 struct lm_idx_t {
-	lm_log_t *lg;
-	loff_t off;
+	lm_log_t *lg1;
+	lm_log_t *lg2;
+	loff_t	soff;
+	loff_t	eoff;
 };
 
 struct lr_hdr_t {

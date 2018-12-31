@@ -38,8 +38,6 @@ struct sect_dlm {
 
 struct lm_log_t {
 	size_t		 size;
-	size_t		 size_avail;
-	size_t		 part_size;
 	uint8_t		 logid;
 	int		 fd;
 	loff_t		 base_offset;
@@ -48,8 +46,6 @@ struct lm_log_t {
 	void		*zero_sect;
 	void		*sect;
 	void		*mmaped_addr;
-	uint64_t	 flr_seqno;	/* First log record's seqno, used in 
-					 * recovery to sort full logs. */
 	struct list_head list;
 };
 
@@ -61,15 +57,14 @@ typedef enum {
 } lb_state_t;
 
 #define LB_FLAG_AIO		0x1 /* async or aligned IO */
-#define LB_FLAG_FULL		0x2 /* corresponding log is full */
-#define LB_FLAG_FORKED		0x4 
-#define LB_FLAG_NOHDR		0x8
+#define LB_FLAG_FORKED		0x2 
+#define LB_FLAG_NOHDR		0x4
 
 struct lg_blk_t {
     	loff_t		 off;		/* next log offset to write to */
 	loff_t		 coff;		/* commit offset */
 	struct sect_dlm	 ps_dlm[2];	/* partial sector headers.  */
-	struct sect_dlm	 fs_dlm;		/* full sector header */
+	struct sect_dlm	 fs_dlm;	/* full sector header */
 	uint8_t		 flags;
 	lb_state_t	 state;
 	uint8_t		 psi;		/* index into psh above */
@@ -88,15 +83,14 @@ struct lg_blk_t {
 #define __mark_aio(lb)		do { (lb)->flags |= LB_FLAG_AIO; }  while (0)	
 #define __mark_nohdr(lb)	do { (lb)->flags |= LB_FLAG_NOHDR; } while (0)	
 #define __mark_forked(lb)	do { (lb)->flags |= LB_FLAG_FORKED; } while (0)	
-#define __mark_full(lb)		do { (lb)->flags |= LB_FLAG_FULL; } while (0)	
 
 #define __sect_floor(off)	((off)  & ~SECT_MASK)
 #define __sect_ceiling(off)	(((off) +  SECT_MASK) & ~SECT_MASK) 
 #define __sect_mod(off)		((off)  &  SECT_MASK)
 
 #define __is_aio(lb)		((lb)->flags & LB_FLAG_AIO)
-#define __is_full(lb)		((lb)->flags & LB_FLAG_FULL)
 #define __is_nohdr(lb)		((lb)->flags & LB_FLAG_NOHDR)
-#define __is_todel(lb)		((lb)->flags & (LB_FLAG_FULL|LB_FLAG_FORKED))
+#define __is_forked(lb)		((lb)->flags & LB_FLAG_FORKED)
+#define __is_full(lb)		((lb)->off == (lb)->lg->size)
 #define __is_active(lb)		((lb)->state == LB_STATE_ACTIVE)
 #endif
